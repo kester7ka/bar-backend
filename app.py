@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SQLITE_DB = os.getenv("SQLITE_DB", r"C:\Users\Kester7ka\Desktop\bot\your_bot_db.sqlite")
+SQLITE_DB = os.getenv("SQLITE_DB", "your_bot_db.sqlite")
 USERS_TABLE = 'users'
 INVITES_TABLE = 'invites'
 BARS = ['АВОШ59', 'АВПМ97', 'АВЯР01', 'АВКОСМ04', 'АВКО04', 'АВДШ02', 'АВКШ78', 'АВПМ58', 'АВЛБ96']
@@ -169,10 +169,26 @@ def api_reopen():
     except Exception as e:
         return jsonify(ok=False, error=str(e))
 
+@app.route('/delete', methods=['POST'])
+def api_delete():
+    data = request.get_json()
+    user_id = data.get('user_id')
+    tob = data.get('tob')
+    try:
+        if not check_user_access(user_id):
+            return jsonify(ok=False, error="Нет доступа")
+        bar_table = get_bar_table(user_id)
+        res = db_query(f"SELECT name FROM {bar_table} WHERE tob=?", (tob,), fetch=True)
+        if not res:
+            return jsonify(ok=False, error="Позиция не найдена")
+        db_query(f"DELETE FROM {bar_table} WHERE tob=?", (tob,))
+        return jsonify(ok=True)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
+
 # =============== TELEGRAM BOT ==============
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    # Telegram error handler
     import traceback
     print("[Telegram Error Handler]", context.error)
     tb = ''.join(traceback.format_exception(None, context.error, context.error.__traceback__))
@@ -192,7 +208,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not check_user_access(user_id):
             await update.message.reply_text("🔑 Введите ваш пригласительный код для регистрации:")
             return REG_WAIT_CODE
-        await update.message.reply_text("✅ Вы уже зарегистрированы!\n\nДля проверки регистрации напишите /whoami.")
+        await update.message.reply_text("✅ Вы уже зарегистрированы!\n\nДля проверки регистрации напишите /whoami.\nДля списка позиций: /list\nДля удаления позиции: /delete")
         return ConversationHandler.END
     except Exception as e:
         await update.message.reply_text(f"Ошибка при проверке регистрации: {e}")
@@ -271,6 +287,26 @@ async def delete_wait_tob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 # ----------- END DELETE LOGIC -----------
 
+# ----------- LIST POSITIONS -----------
+async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not check_user_access(user_id):
+        await update.message.reply_text("Нет доступа. Сначала зарегистрируйтесь.")
+        return
+    bar_table = get_bar_table(user_id)
+    if not bar_table:
+        await update.message.reply_text("Не удалось определить бар пользователя.")
+        return
+    rows = db_query(f"SELECT category, tob, name, expiry_at FROM {bar_table} ORDER BY expiry_at ASC", (), fetch=True)
+    if not rows:
+        await update.message.reply_text("У вас нет добавленных позиций.")
+        return
+    msg = "📋 Ваши позиции:\n"
+    for cat, tob, name, exp in rows:
+        msg += f"\n<b>{name}</b> [{cat}]\nTOB: <code>{tob}</code>\nГоден до: <code>{exp}</code>\n"
+    await update.message.reply_text(msg, parse_mode="HTML")
+# ----------- END LIST POSITIONS -----------
+
 def run_flask():
     app.run(host="0.0.0.0", port=5000)
 
@@ -295,6 +331,8 @@ if __name__ == '__main__':
         states={DELETE_WAIT_TOB: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_wait_tob)]},
         fallbacks=[]
     ))
+    # Показывать свои позиции
+    bot_app.add_handler(CommandHandler('list', list_command))
     bot_app.add_handler(CommandHandler('whoami', whoami))
     bot_app.add_error_handler(error_handler)
     bot_app.run_polling()
