@@ -3,6 +3,7 @@ import threading
 from datetime import datetime, timedelta
 import sqlite3
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler,
@@ -12,7 +13,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SQLITE_DB = os.getenv("SQLITE_DB", r"C:\Users\Kester7ka\Desktop\bot\your_bot_db.sqlite")
+# Корректный путь к базе данных (рядом с app.py)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SQLITE_DB = os.getenv("SQLITE_DB", os.path.join(BASE_DIR, "your_bot_db.sqlite"))
 USERS_TABLE = 'users'
 INVITES_TABLE = 'invites'
 BARS = ['АВОШ59', 'АВПМ97', 'АВЯР01', 'АВКОСМ04', 'АВКО04', 'АВДШ02', 'АВКШ78', 'АВПМ58', 'АВЛБ96']
@@ -57,6 +60,7 @@ def get_bar_table(user_id):
 
 # ================== FLASK (API для сайта) ===================
 app = Flask(__name__)
+CORS(app)
 
 @app.route('/userinfo', methods=['POST'])
 def api_userinfo():
@@ -168,7 +172,6 @@ def api_reopen():
     except Exception as e:
         return jsonify(ok=False, error=str(e))
 
-
 # =============== TELEGRAM BOT ==============
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -244,7 +247,9 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка при получении информации о пользователе: {e}")
 
 def run_flask():
-    app.run(host="0.0.0.0", port=5000)
+    # Railway может использовать переменную PORT, иначе 5000
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 
 if __name__ == '__main__':
     print("Используется база данных:", SQLITE_DB)
