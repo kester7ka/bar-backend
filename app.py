@@ -3,7 +3,6 @@ import threading
 from datetime import datetime, timedelta
 import sqlite3
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler,
@@ -13,15 +12,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Корректный путь к базе данных (рядом с app.py)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SQLITE_DB = os.getenv("SQLITE_DB", os.path.join(BASE_DIR, "your_bot_db.sqlite"))
+SQLITE_DB = os.getenv("SQLITE_DB", r"C:\Users\Kester7ka\Desktop\bot\your_bot_db.sqlite")
 USERS_TABLE = 'users'
 INVITES_TABLE = 'invites'
 BARS = ['АВОШ59', 'АВПМ97', 'АВЯР01', 'АВКОСМ04', 'АВКО04', 'АВДШ02', 'АВКШ78', 'АВПМ58', 'АВЛБ96']
 CATEGORIES = ["🍯 Сиропы", "🥕 Ингредиенты", "📦 Прочее"]
 
 REG_WAIT_CODE = 0
+DELETE_WAIT_TOB = 1000  # состояние для удаления
 
 def db_query(sql, params=(), fetch=False):
     try:
@@ -60,7 +58,6 @@ def get_bar_table(user_id):
 
 # ================== FLASK (API для сайта) ===================
 app = Flask(__name__)
-CORS(app)
 
 @app.route('/userinfo', methods=['POST'])
 def api_userinfo():
@@ -246,10 +243,36 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Ошибка при получении информации о пользователе: {e}")
 
+# ----------- DELETE LOGIC -----------
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not check_user_access(user_id):
+        await update.message.reply_text("Нет доступа. Сначала зарегистрируйтесь.")
+        return ConversationHandler.END
+    await update.message.reply_text("Введите TOB позиции (6 цифр), которую хотите удалить:")
+    return DELETE_WAIT_TOB
+
+async def delete_wait_tob(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    tob = update.message.text.strip()
+    if not tob.isdigit() or len(tob) != 6:
+        await update.message.reply_text("Некорректный TOB. Введите ровно 6 цифр:")
+        return DELETE_WAIT_TOB
+    bar_table = get_bar_table(user_id)
+    if not bar_table:
+        await update.message.reply_text("Не удалось определить бар пользователя.")
+        return ConversationHandler.END
+    res = db_query(f"SELECT name FROM {bar_table} WHERE tob=?", (tob,), fetch=True)
+    if not res:
+        await update.message.reply_text("Позиция с таким TOB не найдена.")
+        return ConversationHandler.END
+    db_query(f"DELETE FROM {bar_table} WHERE tob=?", (tob,))
+    await update.message.reply_text(f"✅ Позиция '{res[0][0]}' (TOB:{tob}) удалена.")
+    return ConversationHandler.END
+# ----------- END DELETE LOGIC -----------
+
 def run_flask():
-    # Railway может использовать переменную PORT, иначе 5000
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
 
 if __name__ == '__main__':
     print("Используется база данных:", SQLITE_DB)
@@ -260,9 +283,16 @@ if __name__ == '__main__':
         print("В файле .env не найден BOT_TOKEN!")
         exit(1)
     bot_app = ApplicationBuilder().token(token).build()
+    # Регистрация
     bot_app.add_handler(ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={REG_WAIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_wait_code)]},
+        fallbacks=[]
+    ))
+    # Удаление
+    bot_app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler('delete', delete_command)],
+        states={DELETE_WAIT_TOB: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_wait_tob)]},
         fallbacks=[]
     ))
     bot_app.add_handler(CommandHandler('whoami', whoami))
