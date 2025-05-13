@@ -3,6 +3,8 @@ import threading
 from datetime import datetime, timedelta
 import sqlite3
 from flask import Flask, request, jsonify
+from flask_cors import CORS
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler,
@@ -19,7 +21,7 @@ BARS = ['АВОШ59', 'АВПМ97', 'АВЯР01', 'АВКОСМ04', 'АВКО04'
 CATEGORIES = ["🍯 Сиропы", "🥕 Ингредиенты", "📦 Прочее"]
 
 REG_WAIT_CODE = 0
-DELETE_WAIT_TOB = 1000  # состояние для удаления
+DELETE_WAIT_TOB = 1000
 
 def db_query(sql, params=(), fetch=False):
     try:
@@ -56,13 +58,14 @@ def get_bar_table(user_id):
     bar_name = get_user_bar(user_id)
     return bar_name if bar_name in BARS else None
 
-# ================== FLASK (API для сайта) ===================
 app = Flask(__name__)
+CORS(app)
 
 @app.route('/userinfo', methods=['POST'])
 def api_userinfo():
     data = request.get_json()
     user_id = data.get('user_id')
+    print(f"[API] userinfo user_id={user_id}")
     try:
         res = db_query(f"SELECT username, bar_name FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
         if res:
@@ -76,6 +79,7 @@ def api_userinfo():
 def api_add():
     data = request.get_json()
     user_id = data.get('user_id')
+    print(f"[API] add user_id={user_id}")
     try:
         if not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
@@ -100,6 +104,7 @@ def api_add():
 def api_expired():
     data = request.get_json()
     user_id = data.get('user_id')
+    print(f"[API] expired user_id={user_id}")
     try:
         if not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
@@ -121,6 +126,7 @@ def api_expired():
 def api_search():
     data = request.get_json()
     user_id = data.get('user_id')
+    print(f"[API] search user_id={user_id}")
     try:
         if not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
@@ -153,6 +159,7 @@ def api_search():
 def api_reopen():
     data = request.get_json()
     user_id = data.get('user_id')
+    print(f"[API] reopen user_id={user_id}")
     try:
         if not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
@@ -174,6 +181,7 @@ def api_delete():
     data = request.get_json()
     user_id = data.get('user_id')
     tob = data.get('tob')
+    print(f"[API] delete user_id={user_id}")
     try:
         if not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
@@ -259,7 +267,6 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Ошибка при получении информации о пользователе: {e}")
 
-# ----------- DELETE LOGIC -----------
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not check_user_access(user_id):
@@ -285,9 +292,7 @@ async def delete_wait_tob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_query(f"DELETE FROM {bar_table} WHERE tob=?", (tob,))
     await update.message.reply_text(f"✅ Позиция '{res[0][0]}' (TOB:{tob}) удалена.")
     return ConversationHandler.END
-# ----------- END DELETE LOGIC -----------
 
-# ----------- LIST POSITIONS -----------
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not check_user_access(user_id):
@@ -305,7 +310,6 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for cat, tob, name, exp in rows:
         msg += f"\n<b>{name}</b> [{cat}]\nTOB: <code>{tob}</code>\nГоден до: <code>{exp}</code>\n"
     await update.message.reply_text(msg, parse_mode="HTML")
-# ----------- END LIST POSITIONS -----------
 
 def run_flask():
     app.run(host="0.0.0.0", port=5000)
@@ -319,19 +323,16 @@ if __name__ == '__main__':
         print("В файле .env не найден BOT_TOKEN!")
         exit(1)
     bot_app = ApplicationBuilder().token(token).build()
-    # Регистрация
     bot_app.add_handler(ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={REG_WAIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_wait_code)]},
         fallbacks=[]
     ))
-    # Удаление
     bot_app.add_handler(ConversationHandler(
         entry_points=[CommandHandler('delete', delete_command)],
         states={DELETE_WAIT_TOB: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_wait_tob)]},
         fallbacks=[]
     ))
-    # Показывать свои позиции
     bot_app.add_handler(CommandHandler('list', list_command))
     bot_app.add_handler(CommandHandler('whoami', whoami))
     bot_app.add_error_handler(error_handler)
