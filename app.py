@@ -27,7 +27,6 @@ CORS(app, origins=["https://kester7ka.github.io", "https://kester7ka.github.io/m
 def db_query(sql, params=(), fetch=False):
     try:
         if not os.path.exists(SQLITE_DB):
-            print(f"Файл базы не найден: {SQLITE_DB}")
             raise Exception(f"Файл базы не найден: {SQLITE_DB}")
         with sqlite3.connect(SQLITE_DB) as conn:
             cursor = conn.cursor()
@@ -37,7 +36,6 @@ def db_query(sql, params=(), fetch=False):
             conn.commit()
             return None
     except Exception as e:
-        print(f"[db_query] SQL error: {e}")
         raise
 
 def get_user_bar(user_id):
@@ -45,14 +43,12 @@ def get_user_bar(user_id):
         res = db_query(f"SELECT bar_name FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
         return res[0][0] if res else None
     except Exception as e:
-        print(f"[get_user_bar] {e}")
         return None
 
 def check_user_access(user_id):
     try:
         return get_user_bar(user_id) is not None
     except Exception as e:
-        print(f"[check_user_access] {e}")
         return False
 
 def get_bar_table(user_id):
@@ -190,7 +186,6 @@ def api_delete():
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     import traceback
-    print("[Telegram Error Handler]", context.error)
     tb = ''.join(traceback.format_exception(None, context.error, context.error.__traceback__))
     try:
         if update and hasattr(update, "message") and update.message:
@@ -200,7 +195,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
     except Exception as e:
-        print("Ошибка при отправке сообщения об ошибке:", e)
+        pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -268,7 +263,8 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка при получении информации о пользователе: {e}")
 
 def run_flask():
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 
 if __name__ == '__main__':
     print("Используется база данных:", SQLITE_DB)
