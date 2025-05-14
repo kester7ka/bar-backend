@@ -22,8 +22,7 @@ CATEGORIES = ["🍯 Сиропы", "🥕 Ингредиенты", "📦 Проч
 REG_WAIT_CODE = 0
 
 app = Flask(__name__)
-# Разрешаем кросс-доменные запросы только от твоего сайта
-CORS(app, origins=["https://kester7ka.github.io", "https://kester7ka.github.io/my-bar-site"])
+CORS(app, origins=["https://kester7ka.github.io", "https://kester7ka.github.io/my-bar-site"], supports_credentials=True)
 
 def db_query(sql, params=(), fetch=False):
     try:
@@ -60,7 +59,6 @@ def get_bar_table(user_id):
     bar_name = get_user_bar(user_id)
     return bar_name if bar_name in BARS else None
 
-# =============== FLASK ===============
 @app.route('/userinfo', methods=['POST'])
 def api_userinfo():
     data = request.get_json()
@@ -190,7 +188,6 @@ def api_delete():
     except Exception as e:
         return jsonify(ok=False, error=str(e))
 
-# =============== TELEGRAM BOT ===============
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     import traceback
     print("[Telegram Error Handler]", context.error)
