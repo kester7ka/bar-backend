@@ -3,8 +3,6 @@ import threading
 from datetime import datetime, timedelta
 import sqlite3
 from flask import Flask, request, jsonify
-from flask_cors import CORS
-
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler,
@@ -21,7 +19,6 @@ BARS = ['АВОШ59', 'АВПМ97', 'АВЯР01', 'АВКОСМ04', 'АВКО04'
 CATEGORIES = ["🍯 Сиропы", "🥕 Ингредиенты", "📦 Прочее"]
 
 REG_WAIT_CODE = 0
-DELETE_WAIT_TOB = 1000
 
 def db_query(sql, params=(), fetch=False):
     try:
@@ -58,14 +55,13 @@ def get_bar_table(user_id):
     bar_name = get_user_bar(user_id)
     return bar_name if bar_name in BARS else None
 
+# =============== FLASK ===============
 app = Flask(__name__)
-CORS(app)
 
 @app.route('/userinfo', methods=['POST'])
 def api_userinfo():
     data = request.get_json()
     user_id = data.get('user_id')
-    print(f"[API] userinfo user_id={user_id}")
     try:
         res = db_query(f"SELECT username, bar_name FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
         if res:
@@ -79,7 +75,6 @@ def api_userinfo():
 def api_add():
     data = request.get_json()
     user_id = data.get('user_id')
-    print(f"[API] add user_id={user_id}")
     try:
         if not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
@@ -104,7 +99,6 @@ def api_add():
 def api_expired():
     data = request.get_json()
     user_id = data.get('user_id')
-    print(f"[API] expired user_id={user_id}")
     try:
         if not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
@@ -126,7 +120,6 @@ def api_expired():
 def api_search():
     data = request.get_json()
     user_id = data.get('user_id')
-    print(f"[API] search user_id={user_id}")
     try:
         if not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
@@ -159,7 +152,6 @@ def api_search():
 def api_reopen():
     data = request.get_json()
     user_id = data.get('user_id')
-    print(f"[API] reopen user_id={user_id}")
     try:
         if not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
@@ -181,7 +173,6 @@ def api_delete():
     data = request.get_json()
     user_id = data.get('user_id')
     tob = data.get('tob')
-    print(f"[API] delete user_id={user_id}")
     try:
         if not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
@@ -194,8 +185,7 @@ def api_delete():
     except Exception as e:
         return jsonify(ok=False, error=str(e))
 
-# =============== TELEGRAM BOT ==============
-
+# =============== TELEGRAM BOT ===============
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     import traceback
     print("[Telegram Error Handler]", context.error)
@@ -216,7 +206,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not check_user_access(user_id):
             await update.message.reply_text("🔑 Введите ваш пригласительный код для регистрации:")
             return REG_WAIT_CODE
-        await update.message.reply_text("✅ Вы уже зарегистрированы!\n\nДля проверки регистрации напишите /whoami.\nДля списка позиций: /list\nДля удаления позиции: /delete")
+        # Если уже зарегистрирован — выводим инфу как /whoami
+        res = db_query(f"SELECT bar_name, registered_at FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
+        if res:
+            bar, reg = res[0]
+            await update.message.reply_text(
+                f"👤 Вы зарегистрированы в баре: <b>{bar}</b>\n"
+                f"Дата регистрации: {reg}", parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text("Данные пользователя не найдены. Зарегистрируйтесь с помощью кода.")
         return ConversationHandler.END
     except Exception as e:
         await update.message.reply_text(f"Ошибка при проверке регистрации: {e}")
@@ -267,50 +266,6 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Ошибка при получении информации о пользователе: {e}")
 
-async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not check_user_access(user_id):
-        await update.message.reply_text("Нет доступа. Сначала зарегистрируйтесь.")
-        return ConversationHandler.END
-    await update.message.reply_text("Введите TOB позиции (6 цифр), которую хотите удалить:")
-    return DELETE_WAIT_TOB
-
-async def delete_wait_tob(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    tob = update.message.text.strip()
-    if not tob.isdigit() or len(tob) != 6:
-        await update.message.reply_text("Некорректный TOB. Введите ровно 6 цифр:")
-        return DELETE_WAIT_TOB
-    bar_table = get_bar_table(user_id)
-    if not bar_table:
-        await update.message.reply_text("Не удалось определить бар пользователя.")
-        return ConversationHandler.END
-    res = db_query(f"SELECT name FROM {bar_table} WHERE tob=?", (tob,), fetch=True)
-    if not res:
-        await update.message.reply_text("Позиция с таким TOB не найдена.")
-        return ConversationHandler.END
-    db_query(f"DELETE FROM {bar_table} WHERE tob=?", (tob,))
-    await update.message.reply_text(f"✅ Позиция '{res[0][0]}' (TOB:{tob}) удалена.")
-    return ConversationHandler.END
-
-async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not check_user_access(user_id):
-        await update.message.reply_text("Нет доступа. Сначала зарегистрируйтесь.")
-        return
-    bar_table = get_bar_table(user_id)
-    if not bar_table:
-        await update.message.reply_text("Не удалось определить бар пользователя.")
-        return
-    rows = db_query(f"SELECT category, tob, name, expiry_at FROM {bar_table} ORDER BY expiry_at ASC", (), fetch=True)
-    if not rows:
-        await update.message.reply_text("У вас нет добавленных позиций.")
-        return
-    msg = "📋 Ваши позиции:\n"
-    for cat, tob, name, exp in rows:
-        msg += f"\n<b>{name}</b> [{cat}]\nTOB: <code>{tob}</code>\nГоден до: <code>{exp}</code>\n"
-    await update.message.reply_text(msg, parse_mode="HTML")
-
 def run_flask():
     app.run(host="0.0.0.0", port=5000)
 
@@ -323,17 +278,12 @@ if __name__ == '__main__':
         print("В файле .env не найден BOT_TOKEN!")
         exit(1)
     bot_app = ApplicationBuilder().token(token).build()
+    # Регистрация
     bot_app.add_handler(ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={REG_WAIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_wait_code)]},
         fallbacks=[]
     ))
-    bot_app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler('delete', delete_command)],
-        states={DELETE_WAIT_TOB: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_wait_tob)]},
-        fallbacks=[]
-    ))
-    bot_app.add_handler(CommandHandler('list', list_command))
     bot_app.add_handler(CommandHandler('whoami', whoami))
     bot_app.add_error_handler(error_handler)
     bot_app.run_polling()
