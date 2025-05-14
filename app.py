@@ -3,6 +3,7 @@ import threading
 from datetime import datetime, timedelta
 import sqlite3
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler,
@@ -19,6 +20,10 @@ BARS = ['АВОШ59', 'АВПМ97', 'АВЯР01', 'АВКОСМ04', 'АВКО04'
 CATEGORIES = ["🍯 Сиропы", "🥕 Ингредиенты", "📦 Прочее"]
 
 REG_WAIT_CODE = 0
+
+app = Flask(__name__)
+# Разрешаем кросс-доменные запросы только от твоего сайта
+CORS(app, origins=["https://kester7ka.github.io", "https://kester7ka.github.io/my-bar-site"])
 
 def db_query(sql, params=(), fetch=False):
     try:
@@ -56,20 +61,11 @@ def get_bar_table(user_id):
     return bar_name if bar_name in BARS else None
 
 # =============== FLASK ===============
-app = Flask(__name__)
-
-def is_from_telegram_webapp(req):
-    tg_hdr = req.headers.get('X-Telegram-Bot-Api-Secret-Token')
-    # Можно добавить проверку по токену, если настроено, или по user-agent
-    # Но чаще всего проверяем, что user_id пришёл, и он реально существует в базе
-    return True
-
 @app.route('/userinfo', methods=['POST'])
 def api_userinfo():
     data = request.get_json()
     user_id = data.get('user_id')
     try:
-        # Webapp: если нет user_id — сразу отказ
         if not user_id:
             return jsonify(ok=False, error="Нет user_id")
         res = db_query(f"SELECT username, bar_name FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
