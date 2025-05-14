@@ -58,11 +58,20 @@ def get_bar_table(user_id):
 # =============== FLASK ===============
 app = Flask(__name__)
 
+def is_from_telegram_webapp(req):
+    tg_hdr = req.headers.get('X-Telegram-Bot-Api-Secret-Token')
+    # Можно добавить проверку по токену, если настроено, или по user-agent
+    # Но чаще всего проверяем, что user_id пришёл, и он реально существует в базе
+    return True
+
 @app.route('/userinfo', methods=['POST'])
 def api_userinfo():
     data = request.get_json()
     user_id = data.get('user_id')
     try:
+        # Webapp: если нет user_id — сразу отказ
+        if not user_id:
+            return jsonify(ok=False, error="Нет user_id")
         res = db_query(f"SELECT username, bar_name FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
         if res:
             username, bar_name = res[0]
@@ -76,7 +85,7 @@ def api_add():
     data = request.get_json()
     user_id = data.get('user_id')
     try:
-        if not check_user_access(user_id):
+        if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
         d = data
@@ -100,7 +109,7 @@ def api_expired():
     data = request.get_json()
     user_id = data.get('user_id')
     try:
-        if not check_user_access(user_id):
+        if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
         now = datetime.now().strftime('%Y-%m-%d')
@@ -121,7 +130,7 @@ def api_search():
     data = request.get_json()
     user_id = data.get('user_id')
     try:
-        if not check_user_access(user_id):
+        if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
         query = data.get('query', '').strip()
@@ -153,7 +162,7 @@ def api_reopen():
     data = request.get_json()
     user_id = data.get('user_id')
     try:
-        if not check_user_access(user_id):
+        if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
         tob = data['tob']
@@ -174,7 +183,7 @@ def api_delete():
     user_id = data.get('user_id')
     tob = data.get('tob')
     try:
-        if not check_user_access(user_id):
+        if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
         res = db_query(f"SELECT name FROM {bar_table} WHERE tob=?", (tob,), fetch=True)
@@ -206,7 +215,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not check_user_access(user_id):
             await update.message.reply_text("🔑 Введите ваш пригласительный код для регистрации:")
             return REG_WAIT_CODE
-        # Если уже зарегистрирован — выводим инфу как /whoami
         res = db_query(f"SELECT bar_name, registered_at FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
         if res:
             bar, reg = res[0]
@@ -278,7 +286,6 @@ if __name__ == '__main__':
         print("В файле .env не найден BOT_TOKEN!")
         exit(1)
     bot_app = ApplicationBuilder().token(token).build()
-    # Регистрация
     bot_app.add_handler(ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={REG_WAIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_wait_code)]},
