@@ -24,27 +24,50 @@ REG_WAIT_CODE = 0
 app = Flask(__name__)
 CORS(app, origins=["https://kester7ka.github.io", "https://kester7ka.github.io/my-bar-site"], supports_credentials=True)
 
+REQUIRED_COLUMNS = [
+    ("category", "TEXT"),
+    ("tob", "TEXT"),
+    ("name", "TEXT"),
+    ("opened_at", "TEXT"),
+    ("shelf_life_days", "INTEGER"),
+    ("expiry_at", "TEXT"),
+    ("opened", "INTEGER DEFAULT 1"),
+    ("closed_id", "INTEGER")
+]
+
 def ensure_bar_table(bar_name):
     if bar_name not in BARS:
         raise Exception("Неизвестный бар")
     with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
-        cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS {bar_name} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT,
-            tob TEXT,
-            name TEXT,
-            opened_at TEXT,
-            shelf_life_days INTEGER,
-            expiry_at TEXT,
-            opened INTEGER DEFAULT 1
-        )
-        """)
+        # Проверяем, что таблица уже существует
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (bar_name,))
+        exists = cursor.fetchone()
+        if not exists:
+            raise Exception(f"Таблица {bar_name} не найдена в базе!")
+        # Достаем существующие столбцы
         cursor.execute(f"PRAGMA table_info({bar_name})")
         columns = [row[1] for row in cursor.fetchall()]
-        if 'opened' not in columns:
-            cursor.execute(f"ALTER TABLE {bar_name} ADD COLUMN opened INTEGER DEFAULT 1")
+        # Добавляем недостающие столбцы
+        for col_name, col_type in REQUIRED_COLUMNS:
+            if col_name not in columns:
+                cursor.execute(f"ALTER TABLE {bar_name} ADD COLUMN {col_name} {col_type}")
+                print(f"[{bar_name}] Добавлен столбец: {col_name} {col_type}")
+        # Заполняем closed_id для закрытых позиций, если есть незаполненные
+        if "closed_id" in [col for col, _ in REQUIRED_COLUMNS]:
+            cursor.execute(f"SELECT COUNT(*) FROM {bar_name} WHERE opened=0 AND closed_id IS NULL")
+            needs_update = cursor.fetchone()[0]
+            if needs_update > 0:
+                cursor.execute(f"SELECT tob, id FROM {bar_name} WHERE opened=0 ORDER BY tob, id")
+                rows = cursor.fetchall()
+                tob_to_counter = {}
+                for tob, row_id in rows:
+                    if tob not in tob_to_counter:
+                        tob_to_counter[tob] = 1
+                    else:
+                        tob_to_counter[tob] += 1
+                    cursor.execute(f"UPDATE {bar_name} SET closed_id=? WHERE id=?", (tob_to_counter[tob], row_id))
+                print(f"[{bar_name}] closed_id заполнен для всех закрытых позиций.")
         conn.commit()
 
 def migrate_all_bars():
@@ -110,8 +133,15 @@ def api_add():
         bar_table = get_bar_table(user_id)
         d = data
         opened = int(d.get('opened', 1))
+        # Для закрытой позиции вычисляем closed_id
+        closed_id = None
+        if opened == 0:
+            # Найти максимальный closed_id для данного TOB
+            res = db_query(f"SELECT MAX(closed_id) FROM {bar_table} WHERE tob=? AND opened=0", (d['tob'],), fetch=True)
+            closed_id = (res[0][0] or 0) + 1
         db_query(
-            f"INSERT INTO {bar_table} (category, tob, name, opened_at, shelf_life_days, expiry_at, opened) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            f"""INSERT INTO {bar_table} (category, tob, name, opened_at, shelf_life_days, expiry_at, opened, closed_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 d['category'],
                 d['tob'],
@@ -119,7 +149,8 @@ def api_add():
                 d['opened_at'],
                 int(d['shelf_life_days']),
                 (datetime.strptime(d['opened_at'], '%Y-%m-%d') + timedelta(days=int(d['shelf_life_days']))).strftime('%Y-%m-%d'),
-                opened
+                opened,
+                closed_id
             )
         )
         return jsonify(ok=True)
@@ -159,22 +190,23 @@ def api_search():
         rows = []
         if not query:
             rows = db_query(
-                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table}", (), fetch=True
+                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened, closed_id FROM {bar_table}", (), fetch=True
             )
         elif query.isdigit() and len(query) == 6:
             rows = db_query(
-                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table} WHERE tob=?", (query,), fetch=True
+                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened, closed_id FROM {bar_table} WHERE tob=?", (query,), fetch=True
             )
         else:
             rows = db_query(
-                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table} WHERE LOWER(name) LIKE ?", (f"%{query}%",), fetch=True
+                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened, closed_id FROM {bar_table} WHERE LOWER(name) LIKE ?", (f"%{query}%",), fetch=True
             )
         results = []
         for r in rows:
             results.append({
                 'category': r[0], 'tob': r[1], 'name': r[2],
                 'opened_at': str(r[3]), 'shelf_life_days': r[4],
-                'expiry_at': str(r[5]), 'opened': r[6]
+                'expiry_at': str(r[5]), 'opened': r[6],
+                'closed_id': r[7]
             })
         if query and query.isdigit() and len(query) == 6:
             opened_items = [x for x in results if x['opened'] == 1]
@@ -212,11 +244,19 @@ def api_delete():
     tob = data.get('tob')
     opened = data.get('opened')
     opened_at = data.get('opened_at')
+    closed_id = data.get('closed_id')
     try:
         if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
-        if opened is not None and opened_at is not None:
+        # Для закрытых ищем по closed_id
+        if opened is not None and opened_at is not None and closed_id:
+            res = db_query(f"SELECT id FROM {bar_table} WHERE tob=? AND opened=? AND opened_at=? AND closed_id=? ORDER BY id LIMIT 1", (tob, int(opened), opened_at, closed_id), fetch=True)
+            if not res:
+                return jsonify(ok=False, error="Позиция не найдена")
+            row_id = res[0][0]
+            db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
+        elif opened is not None and opened_at is not None:
             res = db_query(f"SELECT id FROM {bar_table} WHERE tob=? AND opened=? AND opened_at=? ORDER BY id LIMIT 1", (tob, int(opened), opened_at), fetch=True)
             if not res:
                 return jsonify(ok=False, error="Позиция не найдена")
