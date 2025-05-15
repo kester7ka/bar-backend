@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import sqlite3
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler,
     ContextTypes, filters
@@ -24,46 +24,27 @@ REG_WAIT_CODE = 0
 app = Flask(__name__)
 CORS(app, origins=["https://kester7ka.github.io", "https://kester7ka.github.io/my-bar-site"], supports_credentials=True)
 
-REQUIRED_COLUMNS = [
-    ("category", "TEXT"),
-    ("tob", "TEXT"),
-    ("name", "TEXT"),
-    ("opened_at", "TEXT"),
-    ("shelf_life_days", "INTEGER"),
-    ("expiry_at", "TEXT"),
-    ("opened", "INTEGER DEFAULT 1"),
-    ("closed_id", "INTEGER")
-]
-
 def ensure_bar_table(bar_name):
     if bar_name not in BARS:
         raise Exception("Неизвестный бар")
     with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (bar_name,))
-        exists = cursor.fetchone()
-        if not exists:
-            raise Exception(f"Таблица {bar_name} не найдена в базе!")
+        cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS {bar_name} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT,
+            tob TEXT,
+            name TEXT,
+            opened_at TEXT,
+            shelf_life_days INTEGER,
+            expiry_at TEXT,
+            opened INTEGER DEFAULT 1
+        )
+        """)
         cursor.execute(f"PRAGMA table_info({bar_name})")
         columns = [row[1] for row in cursor.fetchall()]
-        for col_name, col_type in REQUIRED_COLUMNS:
-            if col_name not in columns:
-                cursor.execute(f"ALTER TABLE {bar_name} ADD COLUMN {col_name} {col_type}")
-                print(f"[{bar_name}] Добавлен столбец: {col_name} {col_type}")
-        if "closed_id" in [col for col, _ in REQUIRED_COLUMNS]:
-            cursor.execute(f"SELECT COUNT(*) FROM {bar_name} WHERE opened=0 AND closed_id IS NULL")
-            needs_update = cursor.fetchone()[0]
-            if needs_update > 0:
-                cursor.execute(f"SELECT tob, id FROM {bar_name} WHERE opened=0 ORDER BY tob, id")
-                rows = cursor.fetchall()
-                tob_to_counter = {}
-                for tob, row_id in rows:
-                    if tob not in tob_to_counter:
-                        tob_to_counter[tob] = 1
-                    else:
-                        tob_to_counter[tob] += 1
-                    cursor.execute(f"UPDATE {bar_name} SET closed_id=? WHERE id=?", (tob_to_counter[tob], row_id))
-                print(f"[{bar_name}] closed_id заполнен для всех закрытых позиций.")
+        if 'opened' not in columns:
+            cursor.execute(f"ALTER TABLE {bar_name} ADD COLUMN opened INTEGER DEFAULT 1")
         conn.commit()
 
 def migrate_all_bars():
@@ -71,31 +52,22 @@ def migrate_all_bars():
         ensure_bar_table(bar)
 
 def db_query(sql, params=(), fetch=False):
-    try:
-        if not os.path.exists(SQLITE_DB):
-            raise Exception(f"Файл базы не найден: {SQLITE_DB}")
-        with sqlite3.connect(SQLITE_DB) as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, params)
-            if fetch:
-                return cursor.fetchall()
-            conn.commit()
-            return None
-    except Exception as e:
-        raise
-
-def get_user_bar(user_id):
-    try:
-        res = db_query(f"SELECT bar_name FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
-        return res[0][0] if res else None
-    except Exception as e:
+    if not os.path.exists(SQLITE_DB):
+        raise Exception(f"Файл базы не найден: {SQLITE_DB}")
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        if fetch:
+            return cursor.fetchall()
+        conn.commit()
         return None
 
+def get_user_bar(user_id):
+    res = db_query(f"SELECT bar_name FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
+    return res[0][0] if res else None
+
 def check_user_access(user_id):
-    try:
-        return get_user_bar(user_id) is not None
-    except Exception as e:
-        return False
+    return get_user_bar(user_id) is not None
 
 def get_bar_table(user_id):
     bar_name = get_user_bar(user_id)
@@ -104,132 +76,136 @@ def get_bar_table(user_id):
         return bar_name
     return None
 
+@app.route('/register', methods=['POST'])
+def api_register():
+    data = request.get_json()
+    user_id = data.get('user_id')
+    username = data.get('username', '')
+    code = data.get('invite_code')
+    if not user_id or not code:
+        return jsonify(ok=False, error="Не передан user_id или invite_code")
+    res = db_query(f"SELECT bar_name FROM {INVITES_TABLE} WHERE code=? AND used='нет'", (code,), fetch=True)
+    if not res:
+        return jsonify(ok=False, error="Код не найден или уже использован")
+    user_exists = db_query(f"SELECT user_id FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
+    if user_exists:
+        return jsonify(ok=False, error="Пользователь уже зарегистрирован")
+    bar_name = res[0][0]
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    db_query(
+        f"INSERT INTO {USERS_TABLE} (user_id, username, bar_name, registered_at) VALUES (?, ?, ?, ?)",
+        (user_id, username, bar_name, now)
+    )
+    db_query(
+        f"UPDATE {INVITES_TABLE} SET used='да' WHERE code=?", (code,)
+    )
+    ensure_bar_table(bar_name)
+    return jsonify(ok=True, bar_name=bar_name)
+
 @app.route('/userinfo', methods=['POST'])
 def api_userinfo():
     data = request.get_json()
     user_id = data.get('user_id')
-    try:
-        if not user_id:
-            return jsonify(ok=False, error="Нет user_id")
-        res = db_query(f"SELECT username, bar_name FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
-        if res:
-            username, bar_name = res[0]
-            return jsonify(ok=True, username=username, bar_name=bar_name)
-        return jsonify(ok=False, error="Пользователь не найден")
-    except Exception as e:
-        return jsonify(ok=False, error=str(e))
+    if not user_id:
+        return jsonify(ok=False, error="Нет user_id")
+    res = db_query(f"SELECT username, bar_name FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
+    if res:
+        username, bar_name = res[0]
+        return jsonify(ok=True, username=username, bar_name=bar_name)
+    return jsonify(ok=False, error="Пользователь не найден")
 
 @app.route('/add', methods=['POST'])
 def api_add():
     data = request.get_json()
     user_id = data.get('user_id')
-    try:
-        if not user_id or not check_user_access(user_id):
-            return jsonify(ok=False, error="Нет доступа")
-        bar_table = get_bar_table(user_id)
-        d = data
-        opened = int(d.get('opened', 1))
-        closed_id = None
-        if opened == 0:
-            res = db_query(f"SELECT MAX(closed_id) FROM {bar_table} WHERE tob=? AND opened=0", (d['tob'],), fetch=True)
-            closed_id = (res[0][0] or 0) + 1
-        db_query(
-            f"""INSERT INTO {bar_table} (category, tob, name, opened_at, shelf_life_days, expiry_at, opened, closed_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                d['category'],
-                d['tob'],
-                d['name'],
-                d['opened_at'],
-                int(d['shelf_life_days']),
-                (datetime.strptime(d['opened_at'], '%Y-%m-%d') + timedelta(days=int(d['shelf_life_days']))).strftime('%Y-%m-%d'),
-                opened,
-                closed_id
-            )
+    if not user_id or not check_user_access(user_id):
+        return jsonify(ok=False, error="Нет доступа")
+    bar_table = get_bar_table(user_id)
+    d = data
+    opened = int(d.get('opened', 1))
+    db_query(
+        f"INSERT INTO {bar_table} (category, tob, name, opened_at, shelf_life_days, expiry_at, opened) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            d['category'],
+            d['tob'],
+            d['name'],
+            d['opened_at'],
+            int(d['shelf_life_days']),
+            (datetime.strptime(d['opened_at'], '%Y-%m-%d') + timedelta(days=int(d['shelf_life_days']))).strftime('%Y-%m-%d'),
+            opened
         )
-        return jsonify(ok=True)
-    except Exception as e:
-        return jsonify(ok=False, error=str(e))
+    )
+    return jsonify(ok=True)
 
 @app.route('/expired', methods=['POST'])
 def api_expired():
     data = request.get_json()
     user_id = data.get('user_id')
-    try:
-        if not user_id or not check_user_access(user_id):
-            return jsonify(ok=False, error="Нет доступа")
-        bar_table = get_bar_table(user_id)
-        now = datetime.now().strftime('%Y-%m-%d')
-        rows = db_query(
-            f"SELECT category, tob, name, expiry_at, opened FROM {bar_table} WHERE expiry_at <= ?", (now,), fetch=True
-        )
-        results = []
-        for cat, tob, name, exp, opened in rows:
-            results.append({
-                'category': cat, 'tob': tob, 'name': name, 'expiry_at': str(exp), 'opened': opened
-            })
-        return jsonify(ok=True, results=results)
-    except Exception as e:
-        return jsonify(ok=False, error=str(e))
+    if not user_id or not check_user_access(user_id):
+        return jsonify(ok=False, error="Нет доступа")
+    bar_table = get_bar_table(user_id)
+    now = datetime.now().strftime('%Y-%m-%d')
+    rows = db_query(
+        f"SELECT category, tob, name, expiry_at, opened FROM {bar_table} WHERE expiry_at <= ?", (now,), fetch=True
+    )
+    results = []
+    for cat, tob, name, exp, opened in rows:
+        results.append({
+            'category': cat, 'tob': tob, 'name': name, 'expiry_at': str(exp), 'opened': opened
+        })
+    return jsonify(ok=True, results=results)
 
 @app.route('/search', methods=['POST'])
 def api_search():
     data = request.get_json()
     user_id = data.get('user_id')
-    try:
-        if not user_id or not check_user_access(user_id):
-            return jsonify(ok=False, error="Нет доступа")
-        bar_table = get_bar_table(user_id)
-        query = data.get('query', '').strip().lower()
-        rows = []
-        if not query:
-            rows = db_query(
-                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened, closed_id FROM {bar_table}", (), fetch=True
-            )
-        elif query.isdigit() and len(query) == 6:
-            rows = db_query(
-                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened, closed_id FROM {bar_table} WHERE tob=?", (query,), fetch=True
-            )
-        else:
-            rows = db_query(
-                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened, closed_id FROM {bar_table} WHERE LOWER(name) LIKE ?", (f"%{query}%",), fetch=True
-            )
-        results = []
-        for r in rows:
-            results.append({
-                'category': r[0], 'tob': r[1], 'name': r[2],
-                'opened_at': str(r[3]), 'shelf_life_days': r[4],
-                'expiry_at': str(r[5]), 'opened': r[6],
-                'closed_id': r[7]
-            })
-        if query and query.isdigit() and len(query) == 6:
-            opened_items = [x for x in results if x['opened'] == 1]
-            closed_items = [x for x in results if x['opened'] == 0]
-            closed_items.sort(key=lambda x: abs((datetime.strptime(x['expiry_at'], '%Y-%m-%d') - datetime.now()).days))
-            results = opened_items + closed_items
-        return jsonify(ok=True, results=results)
-    except Exception as e:
-        return jsonify(ok=False, error=str(e))
+    if not user_id or not check_user_access(user_id):
+        return jsonify(ok=False, error="Нет доступа")
+    bar_table = get_bar_table(user_id)
+    query = data.get('query', '').strip().lower()
+    rows = []
+    if not query:
+        rows = db_query(
+            f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table}", (), fetch=True
+        )
+    elif query.isdigit() and len(query) == 6:
+        rows = db_query(
+            f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table} WHERE tob=?", (query,), fetch=True
+        )
+    else:
+        rows = db_query(
+            f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table} WHERE LOWER(name) LIKE ?", (f"%{query}%",), fetch=True
+        )
+    results = []
+    for r in rows:
+        results.append({
+            'category': r[0], 'tob': r[1], 'name': r[2],
+            'opened_at': str(r[3]), 'shelf_life_days': r[4],
+            'expiry_at': str(r[5]), 'opened': r[6]
+        })
+    if query and query.isdigit() and len(query) == 6:
+        opened_items = [x for x in results if x['opened'] == 1]
+        closed_items = [x for x in results if x['opened'] == 0]
+        closed_items.sort(key=lambda x: abs((datetime.strptime(x['expiry_at'], '%Y-%m-%d') - datetime.now()).days))
+        results = opened_items + closed_items
+    return jsonify(ok=True, results=results)
 
 @app.route('/reopen', methods=['POST'])
 def api_reopen():
     data = request.get_json()
     user_id = data.get('user_id')
-    try:
-        if not user_id or not check_user_access(user_id):
-            return jsonify(ok=False, error="Нет доступа")
-        bar_table = get_bar_table(user_id)
-        tob = data['tob']
-        opened_at = data['opened_at']
-        shelf_life_days = int(data['shelf_life_days'])
-        expiry_at = (datetime.strptime(opened_at, '%Y-%m-%d') + timedelta(days=shelf_life_days)).strftime('%Y-%m-%d')
-        db_query(
-            f"UPDATE {bar_table} SET opened_at=?, shelf_life_days=?, expiry_at=? WHERE tob=?",
-            (opened_at, shelf_life_days, expiry_at, tob)
-        )
-        return jsonify(ok=True)
-    except Exception as e:
-        return jsonify(ok=False, error=str(e))
+    if not user_id or not check_user_access(user_id):
+        return jsonify(ok=False, error="Нет доступа")
+    bar_table = get_bar_table(user_id)
+    tob = data['tob']
+    opened_at = data['opened_at']
+    shelf_life_days = int(data['shelf_life_days'])
+    expiry_at = (datetime.strptime(opened_at, '%Y-%m-%d') + timedelta(days=shelf_life_days)).strftime('%Y-%m-%d')
+    db_query(
+        f"UPDATE {bar_table} SET opened_at=?, shelf_life_days=?, expiry_at=? WHERE tob=?",
+        (opened_at, shelf_life_days, expiry_at, tob)
+    )
+    return jsonify(ok=True)
 
 @app.route('/delete', methods=['POST'])
 def api_delete():
@@ -238,60 +214,59 @@ def api_delete():
     tob = data.get('tob')
     opened = data.get('opened')
     opened_at = data.get('opened_at')
-    closed_id = data.get('closed_id')
-    try:
-        if not user_id or not check_user_access(user_id):
-            return jsonify(ok=False, error="Нет доступа")
-        bar_table = get_bar_table(user_id)
-        log_msg = f"[DELETE] tob={tob}, opened={opened}, opened_at={opened_at}, closed_id={closed_id}"
-        print(log_msg)
-        if not tob:
-            return jsonify(ok=False, error="Не передан TOB товара")
-        if opened is None:
-            return jsonify(ok=False, error="Не передан статус opened")
-        if not opened_at:
-            return jsonify(ok=False, error="Не передана дата открытия opened_at")
-        # Для закрытых ищем по closed_id
-        if str(opened) == '0':
-            if closed_id is None:
-                return jsonify(ok=False, error="Не передан closed_id для закрытой позиции")
-            res = db_query(
-                f"SELECT id FROM {bar_table} WHERE tob=? AND opened=0 AND opened_at=? AND closed_id=? ORDER BY id LIMIT 1",
-                (tob, opened_at, int(closed_id)), fetch=True)
-            print(f"[DELETE] SQL result (closed): {res}")
-            if not res:
-                return jsonify(ok=False, error=f"Позиция не найдена по параметрам (tob={tob}, opened=0, opened_at={opened_at}, closed_id={closed_id})")
-            row_id = int(res[0][0])
-            db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
-            return jsonify(ok=True, message="Позиция удалена (закрытая)")
-        # Для открытых ищем по tob+opened+opened_at (closed_id не нужен)
-        else:
-            # Нормализуем дату: если в opened_at есть время, обрезаем
-            opened_at_norm = opened_at.split(' ')[0] if ' ' in opened_at else opened_at
-            res = db_query(
-                f"SELECT id FROM {bar_table} WHERE tob=? AND opened=1 AND opened_at=? ORDER BY id LIMIT 1",
-                (tob, opened_at_norm), fetch=True)
-            print(f"[DELETE] SQL result (opened): {res}")
-            if not res:
-                # Пробуем ещё раз, вдруг opened_at пришла с временем, а в базе без, или наоборот
-                res2 = db_query(
-                    f"SELECT id, opened_at FROM {bar_table} WHERE tob=? AND opened=1 ORDER BY id",
-                    (tob,), fetch=True)
-                if res2:
-                    for r in res2:
-                        # сравним только даты (без времени)
-                        db_date = r[1].split(' ')[0] if r[1] else ''
-                        req_date = opened_at.split(' ')[0] if opened_at else ''
-                        if db_date == req_date:
-                            row_id = int(r[0])
-                            db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
-                            return jsonify(ok=True, message="Позиция удалена (открытая, по нормализации даты)")
-                return jsonify(ok=False, error=f"Позиция не найдена по параметрам (tob={tob}, opened=1, opened_at={opened_at})")
-            row_id = int(res[0][0])
-            db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
-            return jsonify(ok=True, message="Позиция удалена (открытая)")
-    except Exception as e:
-        return jsonify(ok=False, error="Ошибка при удалении: " + str(e))
+    if not user_id or not check_user_access(user_id):
+        return jsonify(ok=False, error="Нет доступа")
+    bar_table = get_bar_table(user_id)
+    if opened is not None and opened_at is not None:
+        res = db_query(f"SELECT id FROM {bar_table} WHERE tob=? AND opened=? AND opened_at=? ORDER BY id LIMIT 1", (tob, int(opened), opened_at), fetch=True)
+        if not res:
+            return jsonify(ok=False, error="Позиция не найдена")
+        row_id = res[0][0]
+        db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
+    else:
+        res = db_query(f"SELECT id FROM {bar_table} WHERE tob=? ORDER BY id LIMIT 1", (tob,), fetch=True)
+        if not res:
+            return jsonify(ok=False, error="Позиция не найдена")
+        row_id = res[0][0]
+        db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
+    return jsonify(ok=True)
+
+@app.route('/export', methods=['POST'])
+def api_export():
+    data = request.get_json()
+    user_id = data.get('user_id')
+    export_type = data.get('type')
+    if not user_id or not check_user_access(user_id):
+        return jsonify(ok=False, error="Нет доступа")
+    bar_table = get_bar_table(user_id)
+    rows = db_query(
+        f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table}",
+        (), fetch=True
+    )
+    token = os.getenv('BOT_TOKEN')
+    bot = Bot(token=token)
+    if export_type == "excel":
+        file_path = f"/tmp/bar_export_{user_id}.csv"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write("Категория;TOB;Название;Дата открытия;Срок хранения (дней);Годен до;Статус\n")
+            for r in rows:
+                f.write(f"{r[0]};{r[1]};{r[2]};{str(r[3])[:10]};{r[4]};{str(r[5])[:10]};{'Открыто' if r[6]==1 else 'Закрыто'}\n")
+        with open(file_path, "rb") as f:
+            bot.send_document(chat_id=user_id, document=f, filename="bar_export.csv", caption="Ваш экспорт по бару (Excel)")
+        os.remove(file_path)
+        return jsonify(ok=True)
+    elif export_type == "pdf":
+        file_path = f"/tmp/bar_export_{user_id}.txt"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write("Категория | TOB | Название | Дата открытия | Срок (дней) | Годен до | Статус\n")
+            f.write("-"*77 + "\n")
+            for r in rows:
+                f.write(f"{r[0]} | {r[1]} | {r[2]} | {str(r[3])[:10]} | {r[4]} | {str(r[5])[:10]} | {'Открыто' if r[6]==1 else 'Закрыто'}\n")
+        with open(file_path, "rb") as f:
+            bot.send_document(chat_id=user_id, document=f, filename="bar_export.pdf", caption="Ваш экспорт по бару (PDF)")
+        os.remove(file_path)
+        return jsonify(ok=True)
+    return jsonify(ok=False, error="Неверный тип экспорта")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     import traceback
@@ -308,69 +283,60 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    try:
-        if not check_user_access(user_id):
-            await update.message.reply_text("🔑 Введите ваш пригласительный код для регистрации:")
-            return REG_WAIT_CODE
-        res = db_query(f"SELECT bar_name, registered_at FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
-        if res:
-            bar, reg = res[0]
-            await update.message.reply_text(
-                f"👤 Вы зарегистрированы в баре: <b>{bar}</b>\n"
-                f"Дата регистрации: {reg}", parse_mode="HTML"
-            )
-        else:
-            await update.message.reply_text("Данные пользователя не найдены. Зарегистрируйтесь с помощью кода.")
-        return ConversationHandler.END
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка при проверке регистрации: {e}")
+    if not check_user_access(user_id):
+        await update.message.reply_text("🔑 Введите ваш пригласительный код для регистрации:")
+        return REG_WAIT_CODE
+    res = db_query(f"SELECT bar_name, registered_at FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
+    if res:
+        bar, reg = res[0]
+        await update.message.reply_text(
+            f"👤 Вы зарегистрированы в баре: <b>{bar}</b>\n"
+            f"Дата регистрации: {reg}", parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text("Данные пользователя не найдены. Зарегистрируйтесь с помощью кода.")
+    return ConversationHandler.END
 
 async def reg_wait_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = update.message.text.strip()
     user_id = update.effective_user.id
     username = update.effective_user.username or ""
-    try:
-        invites = db_query(
-            f"SELECT bar_name FROM {INVITES_TABLE} WHERE code=? AND used='нет'", (code,), fetch=True
-        )
-        if not invites:
-            await update.message.reply_text("❌ Код не найден или уже использован! Попробуйте снова или обратитесь к администратору.")
-            return REG_WAIT_CODE
-        user_exists = db_query(
-            f"SELECT user_id FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True
-        )
-        if user_exists:
-            await update.message.reply_text("✅ Вы уже зарегистрированы.")
-            return ConversationHandler.END
-        bar_name = invites[0][0]
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        db_query(
-            f"INSERT INTO {USERS_TABLE} (user_id, username, bar_name, registered_at) VALUES (?, ?, ?, ?)",
-            (user_id, username, bar_name, now)
-        )
-        db_query(
-            f"UPDATE {INVITES_TABLE} SET used='да' WHERE code=?", (code,)
-        )
-        ensure_bar_table(bar_name)
-        await update.message.reply_text(f"✅ Добро пожаловать в {bar_name}!\nТеперь вы можете пользоваться мини-приложением (сайтом).")
+    invites = db_query(
+        f"SELECT bar_name FROM {INVITES_TABLE} WHERE code=? AND used='нет'", (code,), fetch=True
+    )
+    if not invites:
+        await update.message.reply_text("❌ Код не найден или уже использован! Попробуйте снова или обратитесь к администратору.")
+        return REG_WAIT_CODE
+    user_exists = db_query(
+        f"SELECT user_id FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True
+    )
+    if user_exists:
+        await update.message.reply_text("✅ Вы уже зарегистрированы.")
         return ConversationHandler.END
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка при регистрации: {e}")
+    bar_name = invites[0][0]
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    db_query(
+        f"INSERT INTO {USERS_TABLE} (user_id, username, bar_name, registered_at) VALUES (?, ?, ?, ?)",
+        (user_id, username, bar_name, now)
+    )
+    db_query(
+        f"UPDATE {INVITES_TABLE} SET used='да' WHERE code=?", (code,)
+    )
+    ensure_bar_table(bar_name)
+    await update.message.reply_text(f"✅ Добро пожаловать в {bar_name}!\nТеперь вы можете пользоваться мини-приложением (сайтом).")
+    return ConversationHandler.END
 
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    try:
-        res = db_query(f"SELECT bar_name, registered_at FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
-        if res:
-            bar, reg = res[0]
-            await update.message.reply_text(
-                f"👤 Вы зарегистрированы в баре: <b>{bar}</b>\n"
-                f"Дата регистрации: {reg}", parse_mode="HTML"
-            )
-        else:
-            await update.message.reply_text("Данные пользователя не найдены. Зарегистрируйтесь с помощью кода.")
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка при получении информации о пользователе: {e}")
+    res = db_query(f"SELECT bar_name, registered_at FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
+    if res:
+        bar, reg = res[0]
+        await update.message.reply_text(
+            f"👤 Вы зарегистрированы в баре: <b>{bar}</b>\n"
+            f"Дата регистрации: {reg}", parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text("Данные пользователя не найдены. Зарегистрируйтесь с помощью кода.")
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
