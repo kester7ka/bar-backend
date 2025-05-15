@@ -245,7 +245,6 @@ def api_delete():
         bar_table = get_bar_table(user_id)
         log_msg = f"[DELETE] tob={tob}, opened={opened}, opened_at={opened_at}, closed_id={closed_id}"
         print(log_msg)
-        # Проверим обязательные параметры
         if not tob:
             return jsonify(ok=False, error="Не передан TOB товара")
         if opened is None:
@@ -253,7 +252,7 @@ def api_delete():
         if not opened_at:
             return jsonify(ok=False, error="Не передана дата открытия opened_at")
         # Для закрытых ищем по closed_id
-        if int(opened) == 0:
+        if str(opened) == '0':
             if closed_id is None:
                 return jsonify(ok=False, error="Не передан closed_id для закрытой позиции")
             res = db_query(
@@ -262,18 +261,33 @@ def api_delete():
             print(f"[DELETE] SQL result (closed): {res}")
             if not res:
                 return jsonify(ok=False, error=f"Позиция не найдена по параметрам (tob={tob}, opened=0, opened_at={opened_at}, closed_id={closed_id})")
-            row_id = res[0][0]
+            row_id = int(res[0][0])
             db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
             return jsonify(ok=True, message="Позиция удалена (закрытая)")
         # Для открытых ищем по tob+opened+opened_at (closed_id не нужен)
         else:
+            # Нормализуем дату: если в opened_at есть время, обрезаем
+            opened_at_norm = opened_at.split(' ')[0] if ' ' in opened_at else opened_at
             res = db_query(
                 f"SELECT id FROM {bar_table} WHERE tob=? AND opened=1 AND opened_at=? ORDER BY id LIMIT 1",
-                (tob, opened_at), fetch=True)
+                (tob, opened_at_norm), fetch=True)
             print(f"[DELETE] SQL result (opened): {res}")
             if not res:
+                # Пробуем ещё раз, вдруг opened_at пришла с временем, а в базе без, или наоборот
+                res2 = db_query(
+                    f"SELECT id, opened_at FROM {bar_table} WHERE tob=? AND opened=1 ORDER BY id",
+                    (tob,), fetch=True)
+                if res2:
+                    for r in res2:
+                        # сравним только даты (без времени)
+                        db_date = r[1].split(' ')[0] if r[1] else ''
+                        req_date = opened_at.split(' ')[0] if opened_at else ''
+                        if db_date == req_date:
+                            row_id = int(r[0])
+                            db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
+                            return jsonify(ok=True, message="Позиция удалена (открытая, по нормализации даты)")
                 return jsonify(ok=False, error=f"Позиция не найдена по параметрам (tob={tob}, opened=1, opened_at={opened_at})")
-            row_id = res[0][0]
+            row_id = int(res[0][0])
             db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
             return jsonify(ok=True, message="Позиция удалена (открытая)")
     except Exception as e:
