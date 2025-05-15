@@ -40,20 +40,16 @@ def ensure_bar_table(bar_name):
         raise Exception("Неизвестный бар")
     with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
-        # Проверяем, что таблица уже существует
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (bar_name,))
         exists = cursor.fetchone()
         if not exists:
             raise Exception(f"Таблица {bar_name} не найдена в базе!")
-        # Достаем существующие столбцы
         cursor.execute(f"PRAGMA table_info({bar_name})")
         columns = [row[1] for row in cursor.fetchall()]
-        # Добавляем недостающие столбцы
         for col_name, col_type in REQUIRED_COLUMNS:
             if col_name not in columns:
                 cursor.execute(f"ALTER TABLE {bar_name} ADD COLUMN {col_name} {col_type}")
                 print(f"[{bar_name}] Добавлен столбец: {col_name} {col_type}")
-        # Заполняем closed_id для закрытых позиций, если есть незаполненные
         if "closed_id" in [col for col, _ in REQUIRED_COLUMNS]:
             cursor.execute(f"SELECT COUNT(*) FROM {bar_name} WHERE opened=0 AND closed_id IS NULL")
             needs_update = cursor.fetchone()[0]
@@ -133,10 +129,8 @@ def api_add():
         bar_table = get_bar_table(user_id)
         d = data
         opened = int(d.get('opened', 1))
-        # Для закрытой позиции вычисляем closed_id
         closed_id = None
         if opened == 0:
-            # Найти максимальный closed_id для данного TOB
             res = db_query(f"SELECT MAX(closed_id) FROM {bar_table} WHERE tob=? AND opened=0", (d['tob'],), fetch=True)
             closed_id = (res[0][0] or 0) + 1
         db_query(
@@ -249,28 +243,41 @@ def api_delete():
         if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
+        log_msg = f"[DELETE] tob={tob}, opened={opened}, opened_at={opened_at}, closed_id={closed_id}"
+        print(log_msg)
+        # Проверим обязательные параметры
+        if not tob:
+            return jsonify(ok=False, error="Не передан TOB товара")
+        if opened is None:
+            return jsonify(ok=False, error="Не передан статус opened")
+        if not opened_at:
+            return jsonify(ok=False, error="Не передана дата открытия opened_at")
         # Для закрытых ищем по closed_id
-        if opened is not None and opened_at is not None and closed_id:
-            res = db_query(f"SELECT id FROM {bar_table} WHERE tob=? AND opened=? AND opened_at=? AND closed_id=? ORDER BY id LIMIT 1", (tob, int(opened), opened_at, closed_id), fetch=True)
+        if int(opened) == 0:
+            if closed_id is None:
+                return jsonify(ok=False, error="Не передан closed_id для закрытой позиции")
+            res = db_query(
+                f"SELECT id FROM {bar_table} WHERE tob=? AND opened=0 AND opened_at=? AND closed_id=? ORDER BY id LIMIT 1",
+                (tob, opened_at, int(closed_id)), fetch=True)
+            print(f"[DELETE] SQL result (closed): {res}")
             if not res:
-                return jsonify(ok=False, error="Позиция не найдена")
+                return jsonify(ok=False, error=f"Позиция не найдена по параметрам (tob={tob}, opened=0, opened_at={opened_at}, closed_id={closed_id})")
             row_id = res[0][0]
             db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
-        elif opened is not None and opened_at is not None:
-            res = db_query(f"SELECT id FROM {bar_table} WHERE tob=? AND opened=? AND opened_at=? ORDER BY id LIMIT 1", (tob, int(opened), opened_at), fetch=True)
-            if not res:
-                return jsonify(ok=False, error="Позиция не найдена")
-            row_id = res[0][0]
-            db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
+            return jsonify(ok=True, message="Позиция удалена (закрытая)")
+        # Для открытых ищем по tob+opened+opened_at (closed_id не нужен)
         else:
-            res = db_query(f"SELECT id FROM {bar_table} WHERE tob=? ORDER BY id LIMIT 1", (tob,), fetch=True)
+            res = db_query(
+                f"SELECT id FROM {bar_table} WHERE tob=? AND opened=1 AND opened_at=? ORDER BY id LIMIT 1",
+                (tob, opened_at), fetch=True)
+            print(f"[DELETE] SQL result (opened): {res}")
             if not res:
-                return jsonify(ok=False, error="Позиция не найдена")
+                return jsonify(ok=False, error=f"Позиция не найдена по параметрам (tob={tob}, opened=1, opened_at={opened_at})")
             row_id = res[0][0]
             db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
-        return jsonify(ok=True)
+            return jsonify(ok=True, message="Позиция удалена (открытая)")
     except Exception as e:
-        return jsonify(ok=False, error=str(e))
+        return jsonify(ok=False, error="Ошибка при удалении: " + str(e))
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     import traceback
