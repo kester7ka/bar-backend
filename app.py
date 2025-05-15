@@ -38,6 +38,25 @@ def db_query(sql, params=(), fetch=False):
     except Exception as e:
         raise
 
+def ensure_bar_table(bar_name):
+    if bar_name not in BARS:
+        raise Exception("Неизвестный бар")
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS {bar_name} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT,
+            tob TEXT UNIQUE,
+            name TEXT,
+            opened_at TEXT,
+            shelf_life_days INTEGER,
+            expiry_at TEXT,
+            opened INTEGER DEFAULT 1
+        )
+        """)
+        conn.commit()
+
 def get_user_bar(user_id):
     try:
         res = db_query(f"SELECT bar_name FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
@@ -53,7 +72,10 @@ def check_user_access(user_id):
 
 def get_bar_table(user_id):
     bar_name = get_user_bar(user_id)
-    return bar_name if bar_name in BARS else None
+    if bar_name in BARS:
+        ensure_bar_table(bar_name)
+        return bar_name
+    return None
 
 @app.route('/userinfo', methods=['POST'])
 def api_userinfo():
@@ -79,15 +101,17 @@ def api_add():
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
         d = data
+        opened = int(d.get('opened', 1))
         db_query(
-            f"INSERT INTO {bar_table} (category, tob, name, opened_at, shelf_life_days, expiry_at) VALUES (?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO {bar_table} (category, tob, name, opened_at, shelf_life_days, expiry_at, opened) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 d['category'],
                 d['tob'],
                 d['name'],
                 d['opened_at'],
                 int(d['shelf_life_days']),
-                (datetime.strptime(d['opened_at'], '%Y-%m-%d') + timedelta(days=int(d['shelf_life_days']))).strftime('%Y-%m-%d')
+                (datetime.strptime(d['opened_at'], '%Y-%m-%d') + timedelta(days=int(d['shelf_life_days']))).strftime('%Y-%m-%d'),
+                opened
             )
         )
         return jsonify(ok=True)
@@ -104,12 +128,12 @@ def api_expired():
         bar_table = get_bar_table(user_id)
         now = datetime.now().strftime('%Y-%m-%d')
         rows = db_query(
-            f"SELECT category, tob, name, expiry_at FROM {bar_table} WHERE expiry_at <= ?", (now,), fetch=True
+            f"SELECT category, tob, name, expiry_at, opened FROM {bar_table} WHERE expiry_at <= ?", (now,), fetch=True
         )
         results = []
-        for cat, tob, name, exp in rows:
+        for cat, tob, name, exp, opened in rows:
             results.append({
-                'category': cat, 'tob': tob, 'name': name, 'expiry_at': str(exp)
+                'category': cat, 'tob': tob, 'name': name, 'expiry_at': str(exp), 'opened': opened
             })
         return jsonify(ok=True, results=results)
     except Exception as e:
@@ -126,22 +150,22 @@ def api_search():
         query = data.get('query', '').strip()
         if not query:
             rows = db_query(
-                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at FROM {bar_table}", (), fetch=True
+                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table}", (), fetch=True
             )
         elif query.isdigit() and len(query) == 6:
             rows = db_query(
-                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at FROM {bar_table} WHERE tob=?", (query,), fetch=True
+                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table} WHERE tob=?", (query,), fetch=True
             )
         else:
             rows = db_query(
-                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at FROM {bar_table} WHERE name LIKE ?", (f"%{query}%",), fetch=True
+                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table} WHERE name LIKE ?", (f"%{query}%",), fetch=True
             )
         results = []
         for r in rows:
             results.append({
                 'category': r[0], 'tob': r[1], 'name': r[2],
                 'opened_at': str(r[3]), 'shelf_life_days': r[4],
-                'expiry_at': str(r[5])
+                'expiry_at': str(r[5]), 'opened': r[6]
             })
         return jsonify(ok=True, results=results)
     except Exception as e:
@@ -242,6 +266,7 @@ async def reg_wait_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db_query(
             f"UPDATE {INVITES_TABLE} SET used='да' WHERE code=?", (code,)
         )
+        ensure_bar_table(bar_name)
         await update.message.reply_text(f"✅ Добро пожаловать в {bar_name}!\nТеперь вы можете пользоваться мини-приложением (сайтом).")
         return ConversationHandler.END
     except Exception as e:
