@@ -33,11 +33,12 @@ def ensure_bar_table(bar_name):
         CREATE TABLE IF NOT EXISTS {bar_name} (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             category TEXT,
-            tob TEXT UNIQUE,
+            tob TEXT,
             name TEXT,
             opened_at TEXT,
             shelf_life_days INTEGER,
-            expiry_at TEXT
+            expiry_at TEXT,
+            opened INTEGER DEFAULT 1
         )
         """)
         cursor.execute(f"PRAGMA table_info({bar_name})")
@@ -154,7 +155,8 @@ def api_search():
         if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
-        query = data.get('query', '').strip()
+        query = data.get('query', '').strip().lower()
+        rows = []
         if not query:
             rows = db_query(
                 f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table}", (), fetch=True
@@ -165,7 +167,7 @@ def api_search():
             )
         else:
             rows = db_query(
-                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table} WHERE name LIKE ?", (f"%{query}%",), fetch=True
+                f"SELECT category, tob, name, opened_at, shelf_life_days, expiry_at, opened FROM {bar_table} WHERE LOWER(name) LIKE ?", (f"%{query}%",), fetch=True
             )
         results = []
         for r in rows:
@@ -174,6 +176,11 @@ def api_search():
                 'opened_at': str(r[3]), 'shelf_life_days': r[4],
                 'expiry_at': str(r[5]), 'opened': r[6]
             })
+        if query and query.isdigit() and len(query) == 6:
+            opened_items = [x for x in results if x['opened'] == 1]
+            closed_items = [x for x in results if x['opened'] == 0]
+            closed_items.sort(key=lambda x: abs((datetime.strptime(x['expiry_at'], '%Y-%m-%d') - datetime.now()).days))
+            results = opened_items + closed_items
         return jsonify(ok=True, results=results)
     except Exception as e:
         return jsonify(ok=False, error=str(e))
@@ -210,15 +217,17 @@ def api_delete():
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
         if opened is not None and opened_at is not None:
-            res = db_query(f"SELECT name FROM {bar_table} WHERE tob=? AND opened=? AND opened_at=?", (tob, int(opened), opened_at), fetch=True)
+            res = db_query(f"SELECT id FROM {bar_table} WHERE tob=? AND opened=? AND opened_at=? ORDER BY id LIMIT 1", (tob, int(opened), opened_at), fetch=True)
             if not res:
                 return jsonify(ok=False, error="Позиция не найдена")
-            db_query(f"DELETE FROM {bar_table} WHERE tob=? AND opened=? AND opened_at=?", (tob, int(opened), opened_at))
+            row_id = res[0][0]
+            db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
         else:
-            res = db_query(f"SELECT name FROM {bar_table} WHERE tob=?", (tob,), fetch=True)
+            res = db_query(f"SELECT id FROM {bar_table} WHERE tob=? ORDER BY id LIMIT 1", (tob,), fetch=True)
             if not res:
                 return jsonify(ok=False, error="Позиция не найдена")
-            db_query(f"DELETE FROM {bar_table} WHERE tob=?", (tob,))
+            row_id = res[0][0]
+            db_query(f"DELETE FROM {bar_table} WHERE id=?", (row_id,))
         return jsonify(ok=True)
     except Exception as e:
         return jsonify(ok=False, error=str(e))
