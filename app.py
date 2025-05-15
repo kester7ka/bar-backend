@@ -24,20 +24,6 @@ REG_WAIT_CODE = 0
 app = Flask(__name__)
 CORS(app, origins=["https://kester7ka.github.io", "https://kester7ka.github.io/my-bar-site"], supports_credentials=True)
 
-def db_query(sql, params=(), fetch=False):
-    try:
-        if not os.path.exists(SQLITE_DB):
-            raise Exception(f"Файл базы не найден: {SQLITE_DB}")
-        with sqlite3.connect(SQLITE_DB) as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, params)
-            if fetch:
-                return cursor.fetchall()
-            conn.commit()
-            return None
-    except Exception as e:
-        raise
-
 def ensure_bar_table(bar_name):
     if bar_name not in BARS:
         raise Exception("Неизвестный бар")
@@ -51,11 +37,33 @@ def ensure_bar_table(bar_name):
             name TEXT,
             opened_at TEXT,
             shelf_life_days INTEGER,
-            expiry_at TEXT,
-            opened INTEGER DEFAULT 1
+            expiry_at TEXT
         )
         """)
+        # Миграция столбца opened
+        cursor.execute(f"PRAGMA table_info({bar_name})")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'opened' not in columns:
+            cursor.execute(f"ALTER TABLE {bar_name} ADD COLUMN opened INTEGER DEFAULT 1")
         conn.commit()
+
+def migrate_all_bars():
+    for bar in BARS:
+        ensure_bar_table(bar)
+
+def db_query(sql, params=(), fetch=False):
+    try:
+        if not os.path.exists(SQLITE_DB):
+            raise Exception(f"Файл базы не найден: {SQLITE_DB}")
+        with sqlite3.connect(SQLITE_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            if fetch:
+                return cursor.fetchall()
+            conn.commit()
+            return None
+    except Exception as e:
+        raise
 
 def get_user_bar(user_id):
     try:
@@ -294,6 +302,7 @@ def run_flask():
 if __name__ == '__main__':
     print("Используется база данных:", SQLITE_DB)
     print("Файл существует?", os.path.exists(SQLITE_DB))
+    migrate_all_bars()
     threading.Thread(target=run_flask, daemon=True).start()
     token = os.getenv('BOT_TOKEN')
     if not token:
