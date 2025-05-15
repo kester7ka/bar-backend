@@ -24,20 +24,6 @@ REG_WAIT_CODE = 0
 app = Flask(__name__)
 CORS(app, origins=["https://kester7ka.github.io", "https://kester7ka.github.io/my-bar-site"], supports_credentials=True)
 
-def db_query(sql, params=(), fetch=False):
-    try:
-        if not os.path.exists(SQLITE_DB):
-            raise Exception(f"Файл базы не найден: {SQLITE_DB}")
-        with sqlite3.connect(SQLITE_DB) as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, params)
-            if fetch:
-                return cursor.fetchall()
-            conn.commit()
-            return None
-    except Exception as e:
-        raise
-
 def ensure_bar_table(bar_name):
     if bar_name not in BARS:
         raise Exception("Неизвестный бар")
@@ -65,6 +51,20 @@ def migrate_all_bars():
     for bar in BARS:
         ensure_bar_table(bar)
 
+def db_query(sql, params=(), fetch=False):
+    try:
+        if not os.path.exists(SQLITE_DB):
+            raise Exception(f"Файл базы не найден: {SQLITE_DB}")
+        with sqlite3.connect(SQLITE_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            if fetch:
+                return cursor.fetchall()
+            conn.commit()
+            return None
+    except Exception as e:
+        raise
+
 def get_user_bar(user_id):
     try:
         res = db_query(f"SELECT bar_name FROM {USERS_TABLE} WHERE user_id=?", (user_id,), fetch=True)
@@ -84,10 +84,6 @@ def get_bar_table(user_id):
         ensure_bar_table(bar_name)
         return bar_name
     return None
-
-@app.before_first_request
-def before_first_request_func():
-    migrate_all_bars()
 
 @app.route('/userinfo', methods=['POST'])
 def api_userinfo():
