@@ -18,7 +18,6 @@ USERS_TABLE = 'users'
 INVITES_TABLE = 'invites'
 BARS = ['АВОШ59', 'АВПМ97', 'АВЯР01', 'АВКОСМ04', 'АВКО04', 'АВДШ02', 'АВКШ78', 'АВПМ58', 'АВЛБ96']
 CATEGORIES = ["🍯 Сиропы", "🥕 Ингредиенты", "📦 Прочее"]
-
 REG_WAIT_CODE = 0
 
 app = Flask(__name__)
@@ -41,10 +40,6 @@ def ensure_bar_table(bar_name):
             opened INTEGER DEFAULT 1
         )
         """)
-        cursor.execute(f"PRAGMA table_info({bar_name})")
-        columns = [row[1] for row in cursor.fetchall()]
-        if 'opened' not in columns:
-            cursor.execute(f"ALTER TABLE {bar_name} ADD COLUMN opened INTEGER DEFAULT 1")
         conn.commit()
 
 def migrate_all_bars():
@@ -110,19 +105,67 @@ def api_add():
         bar_table = get_bar_table(user_id)
         d = data
         opened = int(d.get('opened', 1))
-        db_query(
-            f"INSERT INTO {bar_table} (category, tob, name, opened_at, shelf_life_days, expiry_at, opened) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                d['category'],
-                d['tob'],
-                d['name'],
-                d['opened_at'],
-                int(d['shelf_life_days']),
-                (datetime.strptime(d['opened_at'], '%Y-%m-%d') + timedelta(days=int(d['shelf_life_days']))).strftime('%Y-%m-%d'),
-                opened
+        opened_at = d['opened_at']
+        shelf_life_days = int(d['shelf_life_days'])
+        expiry_at = (datetime.strptime(opened_at, '%Y-%m-%d') + timedelta(days=shelf_life_days)).strftime('%Y-%m-%d')
+        with sqlite3.connect(SQLITE_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"INSERT INTO {bar_table} (category, tob, name, opened_at, shelf_life_days, expiry_at, opened) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    d['category'],
+                    d['tob'],
+                    d['name'],
+                    opened_at,
+                    shelf_life_days,
+                    expiry_at,
+                    opened
+                )
             )
-        )
-        return jsonify(ok=True)
+            new_id = cursor.lastrowid
+            conn.commit()
+        return jsonify(ok=True, id=new_id)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
+
+@app.route('/open', methods=['POST'])
+def api_open():
+    data = request.get_json()
+    user_id = data.get('user_id')
+    try:
+        if not user_id or not check_user_access(user_id):
+            return jsonify(ok=False, error="Нет доступа")
+        bar_table = get_bar_table(user_id)
+        tob = data['tob']
+        category = data['category']
+        name = data['name']
+        today = datetime.now().strftime('%Y-%m-%d')
+        res = db_query(f"SELECT id, shelf_life_days FROM {bar_table} WHERE tob=? AND opened=1", (tob,), fetch=True)
+        if res:
+            old_id, shelf_life_days = res[0]
+            db_query(f"UPDATE {bar_table} SET opened=0 WHERE id=?", (old_id,))
+            expiry_at = (datetime.now() + timedelta(days=int(shelf_life_days))).strftime('%Y-%m-%d')
+            with sqlite3.connect(SQLITE_DB) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"INSERT INTO {bar_table} (category, tob, name, opened_at, shelf_life_days, expiry_at, opened) VALUES (?, ?, ?, ?, ?, ?, 1)",
+                    (category, tob, name, today, shelf_life_days, expiry_at)
+                )
+                new_id = cursor.lastrowid
+                conn.commit()
+            return jsonify(ok=True, replaced=True, id=new_id)
+        else:
+            shelf_life_days = int(data['shelf_life_days'])
+            expiry_at = (datetime.now() + timedelta(days=shelf_life_days)).strftime('%Y-%m-%d')
+            with sqlite3.connect(SQLITE_DB) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"INSERT INTO {bar_table} (category, tob, name, opened_at, shelf_life_days, expiry_at, opened) VALUES (?, ?, ?, ?, ?, ?, 1)",
+                    (category, tob, name, today, shelf_life_days, expiry_at)
+                )
+                new_id = cursor.lastrowid
+                conn.commit()
+            return jsonify(ok=True, replaced=False, id=new_id)
     except Exception as e:
         return jsonify(ok=False, error=str(e))
 
@@ -135,12 +178,11 @@ def api_expired():
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
         now = datetime.now().strftime('%Y-%m-%d')
-        # Include id in the select query
         rows = db_query(
             f"SELECT id, category, tob, name, expiry_at, opened FROM {bar_table} WHERE expiry_at <= ?", (now,), fetch=True
         )
         results = []
-        for row_id, cat, tob, name, exp, opened in rows: # Adjusted to unpack id
+        for row_id, cat, tob, name, exp, opened in rows:
             results.append({
                 'id': row_id, 'category': cat, 'tob': tob, 'name': name, 'expiry_at': str(exp), 'opened': opened
             })
@@ -157,8 +199,6 @@ def api_search():
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
         query = data.get('query', '').strip().lower()
-        rows = []
-        # Always select id
         select_columns = "id, category, tob, name, opened_at, shelf_life_days, expiry_at, opened"
         if not query:
             rows = db_query(
@@ -196,15 +236,13 @@ def api_reopen():
         if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
-        # Assuming tob is still used to identify which item to reopen, but it might be better to use id here too if editing specific instance.
-        # For now, keeping it as is, as the request was about deletion.
-        tob = data['tob'] 
+        item_id = data['id']
         opened_at = data['opened_at']
         shelf_life_days = int(data['shelf_life_days'])
         expiry_at = (datetime.strptime(opened_at, '%Y-%m-%d') + timedelta(days=shelf_life_days)).strftime('%Y-%m-%d')
         db_query(
-            f"UPDATE {bar_table} SET opened_at=?, shelf_life_days=?, expiry_at=? WHERE tob=?", # This might need to be id if multiple items with same tob
-            (opened_at, shelf_life_days, expiry_at, tob)
+            f"UPDATE {bar_table} SET opened_at=?, shelf_life_days=?, expiry_at=? WHERE id=?",
+            (opened_at, shelf_life_days, expiry_at, item_id)
         )
         return jsonify(ok=True)
     except Exception as e:
@@ -214,22 +252,16 @@ def api_reopen():
 def api_delete():
     data = request.get_json()
     user_id = data.get('user_id')
-    item_id = data.get('id') # Expect 'id' from frontend
-
     try:
         if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
-        
-        if not item_id:
-            return jsonify(ok=False, error="Не указан ID позиции для удаления")
-
         bar_table = get_bar_table(user_id)
-        
-        # Check if item exists before deleting
+        item_id = data.get('id')
+        if not item_id:
+            return jsonify(ok=False, error="Не указан id позиции для удаления")
         res = db_query(f"SELECT id FROM {bar_table} WHERE id=?", (item_id,), fetch=True)
         if not res:
-            return jsonify(ok=False, error="Позиция с указанным ID не найдена")
-        
+            return jsonify(ok=False, error="Позиция с указанным id не найдена")
         db_query(f"DELETE FROM {bar_table} WHERE id=?", (item_id,))
         return jsonify(ok=True)
     except Exception as e:
@@ -319,13 +351,10 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 if __name__ == '__main__':
-    print("Используется база данных:", SQLITE_DB)
-    print("Файл существует?", os.path.exists(SQLITE_DB))
     migrate_all_bars()
     threading.Thread(target=run_flask, daemon=True).start()
     token = os.getenv('BOT_TOKEN')
     if not token:
-        print("В файле .env не найден BOT_TOKEN!")
         exit(1)
     bot_app = ApplicationBuilder().token(token).build()
     bot_app.add_handler(ConversationHandler(
@@ -336,4 +365,3 @@ if __name__ == '__main__':
     bot_app.add_handler(CommandHandler('whoami', whoami))
     bot_app.add_error_handler(error_handler)
     bot_app.run_polling()
-
