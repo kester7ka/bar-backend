@@ -40,7 +40,6 @@ def ensure_bar_table(bar_name):
             expiry_at TEXT
         )
         """)
-        # Миграция столбца opened
         cursor.execute(f"PRAGMA table_info({bar_name})")
         columns = [row[1] for row in cursor.fetchall()]
         if 'opened' not in columns:
@@ -204,14 +203,22 @@ def api_delete():
     data = request.get_json()
     user_id = data.get('user_id')
     tob = data.get('tob')
+    opened = data.get('opened')
+    opened_at = data.get('opened_at')
     try:
         if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
-        res = db_query(f"SELECT name FROM {bar_table} WHERE tob=?", (tob,), fetch=True)
-        if not res:
-            return jsonify(ok=False, error="Позиция не найдена")
-        db_query(f"DELETE FROM {bar_table} WHERE tob=?", (tob,))
+        if opened is not None and opened_at is not None:
+            res = db_query(f"SELECT name FROM {bar_table} WHERE tob=? AND opened=? AND opened_at=?", (tob, int(opened), opened_at), fetch=True)
+            if not res:
+                return jsonify(ok=False, error="Позиция не найдена")
+            db_query(f"DELETE FROM {bar_table} WHERE tob=? AND opened=? AND opened_at=?", (tob, int(opened), opened_at))
+        else:
+            res = db_query(f"SELECT name FROM {bar_table} WHERE tob=?", (tob,), fetch=True)
+            if not res:
+                return jsonify(ok=False, error="Позиция не найдена")
+            db_query(f"DELETE FROM {bar_table} WHERE tob=?", (tob,))
         return jsonify(ok=True)
     except Exception as e:
         return jsonify(ok=False, error=str(e))
