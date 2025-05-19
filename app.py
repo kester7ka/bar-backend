@@ -177,10 +177,16 @@ def api_expired():
         if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
-        now = datetime.now().strftime('%Y-%m-%d')
-        rows = db_query(
-            f"SELECT id, category, tob, name, expiry_at, opened FROM {bar_table} WHERE expiry_at <= ?", (now,), fetch=True
-        )
+        date = data.get('date')
+        if date:
+            rows = db_query(
+                f"SELECT id, category, tob, name, expiry_at, opened FROM {bar_table} WHERE expiry_at = ?", (date,), fetch=True
+            )
+        else:
+            now = datetime.now().strftime('%Y-%m-%d')
+            rows = db_query(
+                f"SELECT id, category, tob, name, expiry_at, opened FROM {bar_table} WHERE expiry_at <= ?", (now,), fetch=True
+            )
         results = []
         for row_id, cat, tob, name, exp, opened in rows:
             results.append({
@@ -228,22 +234,35 @@ def api_search():
     except Exception as e:
         return jsonify(ok=False, error=str(e))
 
-@app.route('/reopen', methods=['POST'])
-def api_reopen():
+@app.route('/update', methods=['POST'])
+def api_update():
     data = request.get_json()
     user_id = data.get('user_id')
     try:
         if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
-        item_id = data['id']
-        opened_at = data['opened_at']
-        shelf_life_days = int(data['shelf_life_days'])
-        expiry_at = (datetime.strptime(opened_at, '%Y-%m-%d') + timedelta(days=shelf_life_days)).strftime('%Y-%m-%d')
-        db_query(
-            f"UPDATE {bar_table} SET opened_at=?, shelf_life_days=?, expiry_at=? WHERE id=?",
-            (opened_at, shelf_life_days, expiry_at, item_id)
-        )
+        item_id = data.get('id')
+        if not item_id:
+            return jsonify(ok=False, error="Не указан id позиции для обновления")
+        # Разрешаем изменять только указанные поля
+        fields = []
+        params = []
+        for field in ('category', 'name', 'shelf_life_days', 'opened_at', 'opened', 'expiry_at'):
+            if field in data:
+                fields.append(f"{field}=?")
+                params.append(data[field])
+        if 'shelf_life_days' in data or 'opened_at' in data:
+            opened_at = data.get('opened_at')
+            shelf_life_days = int(data.get('shelf_life_days', 0))
+            expiry_at = (datetime.strptime(opened_at, '%Y-%m-%d') + timedelta(days=shelf_life_days)).strftime('%Y-%m-%d')
+            if 'expiry_at' not in data:
+                fields.append("expiry_at=?")
+                params.append(expiry_at)
+        params.append(item_id)
+        if not fields:
+            return jsonify(ok=False, error="Нет данных для обновления")
+        db_query(f"UPDATE {bar_table} SET {', '.join(fields)} WHERE id=?", tuple(params))
         return jsonify(ok=True)
     except Exception as e:
         return jsonify(ok=False, error=str(e))
