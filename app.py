@@ -1,6 +1,6 @@
 import os
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import sqlite3
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -17,11 +17,13 @@ SQLITE_DB = os.getenv("SQLITE_DB", "your_bot_db.sqlite")
 USERS_TABLE = 'users'
 INVITES_TABLE = 'invites'
 BARS = ['АВОШ59', 'АВПМ97', 'АВЯР01', 'АВКОСМ04', 'АВКО04', 'АВДШ02', 'АВКШ78', 'АВПМ58', 'АВЛБ96']
-CATEGORIES = ["🍯 Сиропы", "🥕 Ингредиенты", "📦 Прочее"]
+CATEGORIES = ["🍯 Сиропы", "🥕 Ингредиенты", "☕ Кофе", "📦 Прочее"]
 REG_WAIT_CODE = 0
 
 app = Flask(__name__)
 CORS(app, origins=["https://kester7ka.github.io", "https://kester7ka.github.io/my-bar-site"], supports_credentials=True)
+
+MSK_TZ = timezone(timedelta(hours=3))
 
 def ensure_bar_table(bar_name):
     if bar_name not in BARS:
@@ -79,6 +81,12 @@ def get_bar_table(user_id):
         ensure_bar_table(bar_name)
         return bar_name
     return None
+
+def msk_now():
+    return datetime.now(MSK_TZ)
+
+def msk_today_str():
+    return msk_now().strftime('%Y-%m-%d')
 
 @app.route('/userinfo', methods=['POST'])
 def api_userinfo():
@@ -139,12 +147,12 @@ def api_open():
         tob = data['tob']
         category = data['category']
         name = data['name']
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = msk_today_str()
         res = db_query(f"SELECT id, shelf_life_days FROM {bar_table} WHERE tob=? AND opened=1", (tob,), fetch=True)
         if res:
             old_id, shelf_life_days = res[0]
             db_query(f"UPDATE {bar_table} SET opened=0 WHERE id=?", (old_id,))
-            expiry_at = (datetime.now() + timedelta(days=int(shelf_life_days))).strftime('%Y-%m-%d')
+            expiry_at = (msk_now() + timedelta(days=int(shelf_life_days))).strftime('%Y-%m-%d')
             with sqlite3.connect(SQLITE_DB) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
@@ -156,7 +164,7 @@ def api_open():
             return jsonify(ok=True, replaced=True, id=new_id)
         else:
             shelf_life_days = int(data['shelf_life_days'])
-            expiry_at = (datetime.now() + timedelta(days=shelf_life_days)).strftime('%Y-%m-%d')
+            expiry_at = (msk_now() + timedelta(days=shelf_life_days)).strftime('%Y-%m-%d')
             with sqlite3.connect(SQLITE_DB) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
@@ -183,7 +191,7 @@ def api_expired():
                 f"SELECT id, category, tob, name, expiry_at, opened FROM {bar_table} WHERE expiry_at = ?", (date,), fetch=True
             )
         else:
-            now = datetime.now().strftime('%Y-%m-%d')
+            now = msk_today_str()
             rows = db_query(
                 f"SELECT id, category, tob, name, expiry_at, opened FROM {bar_table} WHERE expiry_at <= ?", (now,), fetch=True
             )
@@ -228,7 +236,7 @@ def api_search():
         if query and query.isdigit() and len(query) == 6:
             opened_items = [x for x in results if x['opened'] == 1]
             closed_items = [x for x in results if x['opened'] == 0]
-            closed_items.sort(key=lambda x: abs((datetime.strptime(x['expiry_at'], '%Y-%m-%d') - datetime.now()).days))
+            closed_items.sort(key=lambda x: abs((datetime.strptime(x['expiry_at'], '%Y-%m-%d') - msk_now()).days))
             results = opened_items + closed_items
         return jsonify(ok=True, results=results)
     except Exception as e:
@@ -245,7 +253,6 @@ def api_update():
         item_id = data.get('id')
         if not item_id:
             return jsonify(ok=False, error="Не указан id позиции для обновления")
-        # Разрешаем изменять только указанные поля
         fields = []
         params = []
         for field in ('category', 'name', 'shelf_life_days', 'opened_at', 'opened', 'expiry_at'):
@@ -336,7 +343,7 @@ async def reg_wait_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Вы уже зарегистрированы.")
             return ConversationHandler.END
         bar_name = invites[0][0]
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now = msk_now().strftime('%Y-%m-%d %H:%M:%S')
         db_query(
             f"INSERT INTO {USERS_TABLE} (user_id, username, bar_name, registered_at) VALUES (?, ?, ?, ?)",
             (user_id, username, bar_name, now)
