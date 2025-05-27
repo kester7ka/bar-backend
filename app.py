@@ -29,13 +29,9 @@ CORS(
         "https://kester7ka.github.io",
         "https://kester7ka.github.io/my-bar-site"
     ],
-    supports_credentials=True,
     allow_headers="*",
     methods=["GET", "POST", "OPTIONS"],
-    resources={r"/*": {"origins": [
-        "https://kester7ka.github.io",
-        "https://kester7ka.github.io/my-bar-site"
-    ]}}
+    expose_headers="*"
 )
 
 MSK_TZ = timezone(timedelta(hours=3))
@@ -457,16 +453,31 @@ def restore_db_from_telegram():
     try:
         bot = Bot(token=BOT_TOKEN)
         updates = bot.get_updates()
-        # ищем последнее сообщение с файлом .sqlite от TELEGRAM_ADMIN_ID
+        bot_id = bot.get_me().id
+        found = False
+        # Сначала ищем среди сообщений от самого бота
         for update in reversed(updates):
             msg = update.message
-            if msg and msg.from_user and msg.from_user.id == TELEGRAM_ADMIN_ID:
+            if msg and msg.from_user and msg.from_user.id == bot_id:
                 if msg.document and msg.document.file_name.endswith('.sqlite'):
                     file = bot.get_file(msg.document.file_id)
                     file.download(DB_FILENAME)
-                    print("База данных восстановлена из Telegram.")
-                    return
-        print("Файл базы не найден в чате Telegram.")
+                    print("База данных восстановлена из Telegram (отправитель: бот).")
+                    found = True
+                    break
+        # Если не найдено — ищем среди сообщений от админа
+        if not found:
+            for update in reversed(updates):
+                msg = update.message
+                if msg and msg.from_user and msg.from_user.id == TELEGRAM_ADMIN_ID:
+                    if msg.document and msg.document.file_name.endswith('.sqlite'):
+                        file = bot.get_file(msg.document.file_id)
+                        file.download(DB_FILENAME)
+                        print("База данных восстановлена из Telegram (отправитель: админ).")
+                        found = True
+                        break
+        if not found:
+            print("Файл базы не найден в чате Telegram. Используется локальная база (если есть).")
     except Exception as e:
         print(f"Ошибка при восстановлении базы: {e}")
 
