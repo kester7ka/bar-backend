@@ -416,6 +416,26 @@ async def forcebackup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Ошибка при отправке бэкапа: {e}")
 
+async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    is_admin = (user_id == TELEGRAM_ADMIN_ID)
+    if is_admin:
+        commands = [
+            '/start — регистрация или информация о вас',
+            '/whoami — информация о вашем баре',
+            '/lastbackup — время последнего бэкапа (админ)',
+            '/forcebackup — сделать бэкап сейчас (админ)',
+            '/info — список команд',
+        ]
+    else:
+        commands = [
+            '/start — регистрация или информация о вас',
+            '/whoami — информация о вашем баре',
+            '/info — список команд',
+        ]
+    text = 'Доступные команды:\n' + '\n'.join(commands)
+    await update.message.reply_text(text)
+
 # изменяем periodic_backup чтобы сохранять время
 def periodic_backup():
     global last_backup_time
