@@ -1,4 +1,6 @@
-flask
-flask_cors
 python-telegram-bot
+Flask
+flask-cors
 python-dotenv
+apscheduler
+pytz
