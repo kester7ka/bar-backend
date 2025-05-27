@@ -4,12 +4,14 @@ from datetime import datetime, timedelta, timezone
 import sqlite3
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler,
     ContextTypes, filters
 )
 from dotenv import load_dotenv
+from apscheduler.schedulers.background import BackgroundScheduler
+import pytz
 
 load_dotenv()
 
@@ -24,6 +26,12 @@ app = Flask(__name__)
 CORS(app, origins=["https://kester7ka.github.io", "https://kester7ka.github.io/my-bar-site"], supports_credentials=True)
 
 MSK_TZ = timezone(timedelta(hours=3))
+
+TELEGRAM_ADMIN_ID = 1209688883  # твой user_id
+DB_FILENAME = SQLITE_DB
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+
+last_backup_time = None  # глобальная переменная для хранения времени последнего бэкапа
 
 def ensure_bar_table(bar_name):
     if bar_name not in BARS:
@@ -372,12 +380,71 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Ошибка при получении информации о пользователе: {e}")
 
+async def admin_only(update: Update):
+    return update.effective_user and update.effective_user.id == TELEGRAM_ADMIN_ID
+
+async def lastbackup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await admin_only(update):
+        await update.message.reply_text("Нет доступа")
+        return
+    global last_backup_time
+    if last_backup_time:
+        await update.message.reply_text(f"Последний бэкап был: {last_backup_time}")
+    else:
+        await update.message.reply_text("Бэкап ещё не отправлялся.")
+
+async def forcebackup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await admin_only(update):
+        await update.message.reply_text("Нет доступа")
+        return
+    try:
+        periodic_backup()
+        await update.message.reply_text("Бэкап отправлен!")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка при отправке бэкапа: {e}")
+
+# изменяем periodic_backup чтобы сохранять время
+def periodic_backup():
+    global last_backup_time
+    try:
+        bot = Bot(token=BOT_TOKEN)
+        with open(DB_FILENAME, "rb") as f:
+            bot.send_document(chat_id=TELEGRAM_ADMIN_ID, document=f, filename=DB_FILENAME)
+        last_backup_time = datetime.now(pytz.timezone('Europe/Moscow')).strftime('%Y-%m-%d %H:%M:%S')
+        print("Бэкап базы отправлен в Telegram.")
+    except Exception as e:
+        print(f"Ошибка при отправке бэкапа: {e}")
+
+def start_periodic_backup():
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(periodic_backup, 'interval', hours=2, minutes=30)
+    scheduler.start()
+
+def restore_db_from_telegram():
+    try:
+        bot = Bot(token=BOT_TOKEN)
+        updates = bot.get_updates()
+        # ищем последнее сообщение с файлом .sqlite от TELEGRAM_ADMIN_ID
+        for update in reversed(updates):
+            msg = update.message
+            if msg and msg.from_user and msg.from_user.id == TELEGRAM_ADMIN_ID:
+                if msg.document and msg.document.file_name.endswith('.sqlite'):
+                    file = bot.get_file(msg.document.file_id)
+                    file.download(DB_FILENAME)
+                    print("База данных восстановлена из Telegram.")
+                    return
+        print("Файл базы не найден в чате Telegram.")
+    except Exception as e:
+        print(f"Ошибка при восстановлении базы: {e}")
+
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
 if __name__ == '__main__':
+    restore_db_from_telegram()  # сначала восстановить базу
     migrate_all_bars()
+    start_periodic_backup()     # запустить периодический бэкап
     threading.Thread(target=run_flask, daemon=True).start()
     token = os.getenv('BOT_TOKEN')
     if not token:
@@ -389,5 +456,7 @@ if __name__ == '__main__':
         fallbacks=[]
     ))
     bot_app.add_handler(CommandHandler('whoami', whoami))
+    bot_app.add_handler(CommandHandler('lastbackup', lastbackup))
+    bot_app.add_handler(CommandHandler('forcebackup', forcebackup))
     bot_app.add_error_handler(error_handler)
     bot_app.run_polling()
