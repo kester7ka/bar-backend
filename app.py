@@ -23,7 +23,20 @@ CATEGORIES = ["🍯 Сиропы", "🥕 Ингредиенты", "☕ Кофе"
 REG_WAIT_CODE = 0
 
 app = Flask(__name__)
-CORS(app, origins=["https://kester7ka.github.io", "https://kester7ka.github.io/my-bar-site"], supports_credentials=True)
+CORS(
+    app,
+    origins=[
+        "https://kester7ka.github.io",
+        "https://kester7ka.github.io/my-bar-site"
+    ],
+    supports_credentials=True,
+    allow_headers="*",
+    methods=["GET", "POST", "OPTIONS"],
+    resources={r"/*": {"origins": [
+        "https://kester7ka.github.io",
+        "https://kester7ka.github.io/my-bar-site"
+    ]}}
+)
 
 MSK_TZ = timezone(timedelta(hours=3))
 
@@ -458,5 +471,6 @@ if __name__ == '__main__':
     bot_app.add_handler(CommandHandler('whoami', whoami))
     bot_app.add_handler(CommandHandler('lastbackup', lastbackup))
     bot_app.add_handler(CommandHandler('forcebackup', forcebackup))
+    bot_app.add_handler(CommandHandler('info', info))
     bot_app.add_error_handler(error_handler)
     bot_app.run_polling()
