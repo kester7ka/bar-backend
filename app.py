@@ -441,7 +441,6 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def periodic_backup():
     global last_backup_time
     try:
-        print(f"[periodic_backup] Попытка отправить бэкап: DB_FILENAME={DB_FILENAME}, BOT_TOKEN={'есть' if BOT_TOKEN else 'нет'}, ADMIN_ID={TELEGRAM_ADMIN_ID}")
         if not os.path.exists(DB_FILENAME):
             print(f"[periodic_backup] Файл базы не найден: {DB_FILENAME}")
             return
@@ -450,18 +449,19 @@ def periodic_backup():
         if file_size > 49 * 1024 * 1024:
             print(f"[periodic_backup] Файл слишком большой для Telegram (>49MB)")
             return
-        bot = Bot(token=BOT_TOKEN)
-        with open(DB_FILENAME, "rb") as f:
-            bot.send_document(chat_id=TELEGRAM_ADMIN_ID, document=f, filename=DB_FILENAME)
+        # Используем асинхронную отправку через telegram.ext
+        from telegram.ext import Application
+        import asyncio
+        async def send_backup():
+            app = Application.builder().token(BOT_TOKEN).build()
+            async with app:
+                with open(DB_FILENAME, "rb") as f:
+                    await app.bot.send_document(chat_id=TELEGRAM_ADMIN_ID, document=f, filename=DB_FILENAME)
+            print("Бэкап базы отправлен в Telegram.")
+        asyncio.run(send_backup())
         last_backup_time = datetime.now(pytz.timezone('Europe/Moscow')).strftime('%Y-%m-%d %H:%M:%S')
-        print("Бэкап базы отправлен в Telegram.")
     except Exception as e:
         print(f"Ошибка при отправке бэкапа: {e}")
-        try:
-            bot = Bot(token=BOT_TOKEN)
-            bot.send_message(chat_id=TELEGRAM_ADMIN_ID, text=f"Ошибка при отправке бэкапа: {e}")
-        except Exception as e2:
-            print(f"Ошибка при отправке сообщения об ошибке: {e2}")
 
 def start_periodic_backup():
     scheduler = BackgroundScheduler()
@@ -603,4 +603,3 @@ if __name__ == '__main__':
     bot_app.add_handler(CommandHandler('restorebackup', restorebackup))
     bot_app.add_error_handler(error_handler)
     bot_app.run_polling()
-    
