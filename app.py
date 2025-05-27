@@ -21,6 +21,8 @@ INVITES_TABLE = 'invites'
 BARS = ['АВОШ59', 'АВПМ97', 'АВЯР01', 'АВКОСМ04', 'АВКО04', 'АВДШ02', 'АВКШ78', 'АВПМ58', 'АВЛБ96']
 CATEGORIES = ["🍯 Сиропы", "🥕 Ингредиенты", "☕ Кофе", "📦 Прочее"]
 REG_WAIT_CODE = 0
+UPLOAD_BACKUP_WAIT_FILE = 100  # новое состояние для загрузки бэкапа
+RESTORE_BACKUP_WAIT_FILE = 101  # состояние для восстановления базы
 
 app = Flask(__name__)
 CORS(
@@ -436,6 +438,15 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def periodic_backup():
     global last_backup_time
     try:
+        print(f"[periodic_backup] Попытка отправить бэкап: DB_FILENAME={DB_FILENAME}, BOT_TOKEN={'есть' if BOT_TOKEN else 'нет'}, ADMIN_ID={TELEGRAM_ADMIN_ID}")
+        if not os.path.exists(DB_FILENAME):
+            print(f"[periodic_backup] Файл базы не найден: {DB_FILENAME}")
+            return
+        file_size = os.path.getsize(DB_FILENAME)
+        print(f"[periodic_backup] Размер файла: {file_size} байт")
+        if file_size > 49 * 1024 * 1024:
+            print(f"[periodic_backup] Файл слишком большой для Telegram (>49MB)")
+            return
         bot = Bot(token=BOT_TOKEN)
         with open(DB_FILENAME, "rb") as f:
             bot.send_document(chat_id=TELEGRAM_ADMIN_ID, document=f, filename=DB_FILENAME)
@@ -443,6 +454,11 @@ def periodic_backup():
         print("Бэкап базы отправлен в Telegram.")
     except Exception as e:
         print(f"Ошибка при отправке бэкапа: {e}")
+        try:
+            bot = Bot(token=BOT_TOKEN)
+            bot.send_message(chat_id=TELEGRAM_ADMIN_ID, text=f"Ошибка при отправке бэкапа: {e}")
+        except Exception as e2:
+            print(f"Ошибка при отправке сообщения об ошибке: {e2}")
 
 def start_periodic_backup():
     scheduler = BackgroundScheduler()
@@ -485,6 +501,72 @@ def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
+UPLOAD_BACKUP_WAIT_FILE = 100  # новое состояние для загрузки бэкапа
+
+async def uploadbackup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != TELEGRAM_ADMIN_ID:
+        await update.message.reply_text("Нет доступа")
+        return ConversationHandler.END
+    await update.message.reply_text("Пожалуйста, отправьте файл бэкапа (.sqlite)")
+    return UPLOAD_BACKUP_WAIT_FILE
+
+async def handle_backup_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != TELEGRAM_ADMIN_ID:
+        await update.message.reply_text("Нет доступа")
+        return ConversationHandler.END
+    doc = update.message.document
+    if not doc or not doc.file_name.endswith('.sqlite'):
+        await update.message.reply_text("Пожалуйста, отправьте файл с расширением .sqlite")
+        return UPLOAD_BACKUP_WAIT_FILE
+    file = await doc.get_file()
+    file_path = f"received_{doc.file_name}"
+    await file.download_to_drive(file_path)
+    await update.message.reply_text(f"Файл получен. Отправляю в чат...")
+    bot = Bot(token=BOT_TOKEN)
+    with open(file_path, "rb") as f:
+        bot.send_document(chat_id=TELEGRAM_ADMIN_ID, document=f, filename=doc.file_name)
+    await update.message.reply_text("Бэкап отправлен!")
+    os.remove(file_path)
+    return ConversationHandler.END
+
+async def sendbackup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != TELEGRAM_ADMIN_ID:
+        await update.message.reply_text("Нет доступа")
+        return
+    if not os.path.exists(DB_FILENAME):
+        await update.message.reply_text("Файл базы не найден!")
+        return
+    await update.message.reply_text("Отправляю текущий бэкап...")
+    bot = Bot(token=BOT_TOKEN)
+    with open(DB_FILENAME, "rb") as f:
+        bot.send_document(chat_id=TELEGRAM_ADMIN_ID, document=f, filename=DB_FILENAME)
+    await update.message.reply_text("Бэкап отправлен!")
+
+async def restorebackup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != TELEGRAM_ADMIN_ID:
+        await update.message.reply_text("Нет доступа")
+        return ConversationHandler.END
+    await update.message.reply_text("Пожалуйста, отправьте файл бэкапа (.sqlite), чтобы восстановить базу. ВНИМАНИЕ: текущая база будет перезаписана!")
+    return RESTORE_BACKUP_WAIT_FILE
+
+async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != TELEGRAM_ADMIN_ID:
+        await update.message.reply_text("Нет доступа")
+        return ConversationHandler.END
+    doc = update.message.document
+    if not doc or not doc.file_name.endswith('.sqlite'):
+        await update.message.reply_text("Пожалуйста, отправьте файл с расширением .sqlite")
+        return RESTORE_BACKUP_WAIT_FILE
+    file = await doc.get_file()
+    await file.download_to_drive(DB_FILENAME)
+    await update.message.reply_text(f"База успешно восстановлена из файла {doc.file_name}!")
+    return ConversationHandler.END
+
 if __name__ == '__main__':
     restore_db_from_telegram()  # сначала восстановить базу
     migrate_all_bars()
@@ -496,12 +578,19 @@ if __name__ == '__main__':
     bot_app = ApplicationBuilder().token(token).build()
     bot_app.add_handler(ConversationHandler(
         entry_points=[CommandHandler('start', start)],
-        states={REG_WAIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_wait_code)]},
+        states={
+            REG_WAIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_wait_code)],
+            UPLOAD_BACKUP_WAIT_FILE: [MessageHandler(filters.Document.ALL, handle_backup_file)],
+            RESTORE_BACKUP_WAIT_FILE: [MessageHandler(filters.Document.ALL, handle_restore_file)]
+        },
         fallbacks=[]
     ))
     bot_app.add_handler(CommandHandler('whoami', whoami))
     bot_app.add_handler(CommandHandler('lastbackup', lastbackup))
     bot_app.add_handler(CommandHandler('forcebackup', forcebackup))
     bot_app.add_handler(CommandHandler('info', info))
+    bot_app.add_handler(CommandHandler('uploadbackup', uploadbackup))
+    bot_app.add_handler(CommandHandler('sendbackup', sendbackup))
+    bot_app.add_handler(CommandHandler('restorebackup', restorebackup))
     bot_app.add_error_handler(error_handler)
     bot_app.run_polling()
