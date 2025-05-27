@@ -548,9 +548,8 @@ async def sendbackup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if file_size > 49 * 1024 * 1024:
             await update.message.reply_text("Файл слишком большой для Telegram (>49MB)")
             return
-        bot = Bot(token=BOT_TOKEN)
         with open(DB_FILENAME, "rb") as f:
-            bot.send_document(chat_id=update.effective_chat.id, document=f, filename=DB_FILENAME)
+            await context.bot.send_document(chat_id=update.effective_chat.id, document=f, filename=DB_FILENAME)
         await update.message.reply_text("Бэкап отправлен!")
     except Exception as e:
         await update.message.reply_text(f"Ошибка при отправке бэкапа: {e}")
@@ -604,3 +603,4 @@ if __name__ == '__main__':
     bot_app.add_handler(CommandHandler('restorebackup', restorebackup))
     bot_app.add_error_handler(error_handler)
     bot_app.run_polling()
+    
