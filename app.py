@@ -550,7 +550,7 @@ async def sendbackup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         bot = Bot(token=BOT_TOKEN)
         with open(DB_FILENAME, "rb") as f:
-            bot.send_document(chat_id=TELEGRAM_ADMIN_ID, document=f, filename=DB_FILENAME)
+            bot.send_document(chat_id=update.effective_chat.id, document=f, filename=DB_FILENAME)
         await update.message.reply_text("Бэкап отправлен!")
     except Exception as e:
         await update.message.reply_text(f"Ошибка при отправке бэкапа: {e}")
