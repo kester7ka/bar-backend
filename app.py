@@ -423,6 +423,9 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             '/whoami — информация о вашем баре',
             '/lastbackup — время последнего бэкапа (админ)',
             '/forcebackup — сделать бэкап сейчас (админ)',
+            '/sendbackup — получить текущий бэкап базы (админ)',
+            '/restorebackup — восстановить базу из файла (админ)',
+            '/uploadbackup — переслать файл в чат (админ)',
             '/info — список команд',
         ]
     else:
@@ -536,14 +539,21 @@ async def sendbackup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id != TELEGRAM_ADMIN_ID:
         await update.message.reply_text("Нет доступа")
         return
-    if not os.path.exists(DB_FILENAME):
-        await update.message.reply_text("Файл базы не найден!")
-        return
-    await update.message.reply_text("Отправляю текущий бэкап...")
-    bot = Bot(token=BOT_TOKEN)
-    with open(DB_FILENAME, "rb") as f:
-        bot.send_document(chat_id=TELEGRAM_ADMIN_ID, document=f, filename=DB_FILENAME)
-    await update.message.reply_text("Бэкап отправлен!")
+    try:
+        if not os.path.exists(DB_FILENAME):
+            await update.message.reply_text(f"Файл базы не найден: {DB_FILENAME}")
+            return
+        file_size = os.path.getsize(DB_FILENAME)
+        await update.message.reply_text(f"Размер файла: {file_size} байт. Пробую отправить...")
+        if file_size > 49 * 1024 * 1024:
+            await update.message.reply_text("Файл слишком большой для Telegram (>49MB)")
+            return
+        bot = Bot(token=BOT_TOKEN)
+        with open(DB_FILENAME, "rb") as f:
+            bot.send_document(chat_id=TELEGRAM_ADMIN_ID, document=f, filename=DB_FILENAME)
+        await update.message.reply_text("Бэкап отправлен!")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка при отправке бэкапа: {e}")
 
 async def restorebackup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
