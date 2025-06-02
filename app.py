@@ -55,10 +55,11 @@ def ensure_bar_table(bar_name):
             category TEXT,
             tob TEXT,
             name TEXT,
-            opened_at TEXT,
+            manufactured_at TEXT,
             shelf_life_days INTEGER,
-            expiry_at TEXT,
-            opened INTEGER DEFAULT 1
+            opened_at TEXT,
+            opened_shelf_life_days INTEGER,
+            opened INTEGER DEFAULT 0
         )
         """)
         conn.commit()
@@ -107,6 +108,27 @@ def msk_now():
 def msk_today_str():
     return msk_now().strftime('%Y-%m-%d')
 
+def calc_expiry_by_total(manufactured_at, shelf_life_days):
+    if not manufactured_at or not shelf_life_days:
+        return None
+    try:
+        return (datetime.strptime(manufactured_at, '%Y-%m-%d') + timedelta(days=int(shelf_life_days))).strftime('%Y-%m-%d')
+    except:
+        return None
+
+def calc_expiry_by_opened(opened_at, opened_shelf_life_days):
+    if not opened_at or not opened_shelf_life_days:
+        return None
+    try:
+        return (datetime.strptime(opened_at, '%Y-%m-%d') + timedelta(days=int(opened_shelf_life_days))).strftime('%Y-%m-%d')
+    except:
+        return None
+
+def min_date(date1, date2):
+    if date1 and date2:
+        return min(date1, date2)
+    return date1 or date2
+
 @app.route('/userinfo', methods=['POST'])
 def api_userinfo():
     data = request.get_json()
@@ -131,21 +153,26 @@ def api_add():
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
         d = data
-        opened = int(d.get('opened', 1))
-        opened_at = d['opened_at']
+        # обязательные поля
+        manufactured_at = d['manufactured_at']
         shelf_life_days = int(d['shelf_life_days'])
-        expiry_at = (datetime.strptime(opened_at, '%Y-%m-%d') + timedelta(days=shelf_life_days)).strftime('%Y-%m-%d')
+        opened = int(d.get('opened', 0))
+        opened_at = d.get('opened_at')
+        opened_shelf_life_days = d.get('opened_shelf_life_days')
+        if opened_shelf_life_days is not None:
+            opened_shelf_life_days = int(opened_shelf_life_days)
         with sqlite3.connect(SQLITE_DB) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"INSERT INTO {bar_table} (category, tob, name, opened_at, shelf_life_days, expiry_at, opened) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO {bar_table} (category, tob, name, manufactured_at, shelf_life_days, opened_at, opened_shelf_life_days, opened) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     d['category'],
                     d['tob'],
                     d['name'],
-                    opened_at,
+                    manufactured_at,
                     shelf_life_days,
-                    expiry_at,
+                    opened_at,
+                    opened_shelf_life_days,
                     opened
                 )
             )
@@ -204,21 +231,26 @@ def api_expired():
         if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
-        date = data.get('date')
-        if date:
-            rows = db_query(
-                f"SELECT id, category, tob, name, expiry_at, opened FROM {bar_table} WHERE expiry_at = ?", (date,), fetch=True
-            )
-        else:
-            now = msk_today_str()
-            rows = db_query(
-                f"SELECT id, category, tob, name, expiry_at, opened FROM {bar_table} WHERE expiry_at <= ?", (now,), fetch=True
-            )
+        now = msk_today_str()
+        select_columns = "id, category, tob, name, manufactured_at, shelf_life_days, opened_at, opened_shelf_life_days, opened"
+        rows = db_query(
+            f"SELECT {select_columns} FROM {bar_table}", (), fetch=True
+        )
         results = []
-        for row_id, cat, tob, name, exp, opened in rows:
-            results.append({
-                'id': row_id, 'category': cat, 'tob': tob, 'name': name, 'expiry_at': str(exp), 'opened': opened
-            })
+        for r in rows:
+            expiry_by_total = calc_expiry_by_total(r[4], r[5])
+            expiry_by_opened = calc_expiry_by_opened(r[6], r[7])
+            expiry_final = min_date(expiry_by_total, expiry_by_opened)
+            if expiry_final and expiry_final <= now:
+                results.append({
+                    'id': r[0], 'category': r[1], 'tob': r[2], 'name': r[3],
+                    'manufactured_at': r[4], 'shelf_life_days': r[5],
+                    'opened_at': r[6], 'opened_shelf_life_days': r[7],
+                    'opened': r[8],
+                    'expiry_by_total': expiry_by_total,
+                    'expiry_by_opened': expiry_by_opened,
+                    'expiry_final': expiry_final
+                })
         return jsonify(ok=True, results=results)
     except Exception as e:
         return jsonify(ok=False, error=str(e))
@@ -232,7 +264,7 @@ def api_search():
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
         query = data.get('query', '').strip().lower()
-        select_columns = "id, category, tob, name, opened_at, shelf_life_days, expiry_at, opened"
+        select_columns = "id, category, tob, name, manufactured_at, shelf_life_days, opened_at, opened_shelf_life_days, opened"
         if not query:
             rows = db_query(
                 f"SELECT {select_columns} FROM {bar_table}", (), fetch=True
@@ -247,16 +279,18 @@ def api_search():
             )
         results = []
         for r in rows:
+            expiry_by_total = calc_expiry_by_total(r[4], r[5])
+            expiry_by_opened = calc_expiry_by_opened(r[6], r[7])
+            expiry_final = min_date(expiry_by_total, expiry_by_opened)
             results.append({
                 'id': r[0], 'category': r[1], 'tob': r[2], 'name': r[3],
-                'opened_at': str(r[4]), 'shelf_life_days': r[5],
-                'expiry_at': str(r[6]), 'opened': r[7]
+                'manufactured_at': r[4], 'shelf_life_days': r[5],
+                'opened_at': r[6], 'opened_shelf_life_days': r[7],
+                'opened': r[8],
+                'expiry_by_total': expiry_by_total,
+                'expiry_by_opened': expiry_by_opened,
+                'expiry_final': expiry_final
             })
-        if query and query.isdigit() and len(query) == 6:
-            opened_items = [x for x in results if x['opened'] == 1]
-            closed_items = [x for x in results if x['opened'] == 0]
-            closed_items.sort(key=lambda x: abs((datetime.strptime(x['expiry_at'], '%Y-%m-%d') - msk_now()).days))
-            results = opened_items + closed_items
         return jsonify(ok=True, results=results)
     except Exception as e:
         return jsonify(ok=False, error=str(e))
@@ -274,17 +308,10 @@ def api_update():
             return jsonify(ok=False, error="Не указан id позиции для обновления")
         fields = []
         params = []
-        for field in ('category', 'name', 'shelf_life_days', 'opened_at', 'opened', 'expiry_at'):
+        for field in ('category', 'name', 'manufactured_at', 'shelf_life_days', 'opened_at', 'opened_shelf_life_days', 'opened'):
             if field in data:
                 fields.append(f"{field}=?")
                 params.append(data[field])
-        if 'shelf_life_days' in data or 'opened_at' in data:
-            opened_at = data.get('opened_at')
-            shelf_life_days = int(data.get('shelf_life_days', 0))
-            expiry_at = (datetime.strptime(opened_at, '%Y-%m-%d') + timedelta(days=shelf_life_days)).strftime('%Y-%m-%d')
-            if 'expiry_at' not in data:
-                fields.append("expiry_at=?")
-                params.append(expiry_at)
         params.append(item_id)
         if not fields:
             return jsonify(ok=False, error="Нет данных для обновления")
