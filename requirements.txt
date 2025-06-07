@@ -4,3 +4,6 @@ flask-cors
 python-dotenv
 apscheduler
 pytz
+opencv-python
+numpy
+qrcode
