@@ -2,7 +2,7 @@ import os
 import threading
 from datetime import datetime, timedelta, timezone
 import sqlite3
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, render_template_string
 from flask_cors import CORS
 from telegram import Update, Bot
 from telegram.ext import (
@@ -12,9 +12,10 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
-import cv2
-import numpy as np
+from PIL import Image
+from pyzbar.pyzbar import decode
 import qrcode
+from werkzeug.utils import secure_filename
 
 load_dotenv()
 
@@ -27,6 +28,10 @@ REG_WAIT_CODE = 0
 UPLOAD_BACKUP_WAIT_FILE = 100  # новое состояние для загрузки бэкапа
 RESTORE_BACKUP_WAIT_FILE = 101  # состояние для восстановления базы
 
+UPLOAD_FOLDER = 'uploads'
+QR_FOLDER = 'clean_qr'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
+
 app = Flask(__name__)
 CORS(
     app,
@@ -38,6 +43,10 @@ CORS(
     methods=["GET", "POST", "OPTIONS"],
     expose_headers="*"
 )
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['QR_FOLDER'] = QR_FOLDER
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(QR_FOLDER, exist_ok=True)
 
 MSK_TZ = timezone(timedelta(hours=3))
 
@@ -46,6 +55,25 @@ DB_FILENAME = SQLITE_DB
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 last_backup_time = None  # глобальная переменная для хранения времени последнего бэкапа
+
+HTML = '''
+<!doctype html>
+<title>Super QR Decoder Demo</title>
+<h2>Взлом и восстановление QR-кода</h2>
+<form method=post enctype=multipart/form-data>
+  <input type=file name=file accept="image/*">
+  <input type=submit value=Загрузить>
+</form>
+{% if filename %}
+  <h3>Чистый QR-код:</h3>
+  <img style="max-width:340px;max-height:340px;border:2px solid #444;" src="{{ url_for('qr_image', filename=filename) }}">
+  <br>
+  <a href="{{ url_for('qr_image', filename=filename) }}" download>Скачать QR (PNG)</a>
+{% endif %}
+{% if error %}
+  <p style="color:red;">{{error}}</p>
+{% endif %}
+'''
 
 def ensure_bar_table(bar_name):
     if bar_name not in BARS:
@@ -342,33 +370,33 @@ def api_delete():
     except Exception as e:
         return jsonify(ok=False, error=str(e))
 
-@app.route('/upload_qr', methods=['POST'])
+@app.route('/', methods=['GET', 'POST'])
 def upload_qr():
-    user_id = request.form.get('user_id')
-    file = request.files.get('file')
-    if not user_id or not file:
-        return jsonify(ok=False, error="user_id и файл обязательны")
-    # Сохраняем временно файл
-    temp_path = f"temp_qr_{user_id}.png"
-    file.save(temp_path)
-    try:
-        img = cv2.imread(temp_path)
-        detector = cv2.QRCodeDetector()
-        data, points, _ = detector.detectAndDecode(img)
-        if not data:
-            # Пробуем в градациях серого
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            data, points, _ = detector.detectAndDecode(gray)
-        if not data:
-            return jsonify(ok=False, error="QR-код не распознан")
-        # Сохраняем содержимое QR в БД
-        db_query(f"UPDATE {USERS_TABLE} SET qr_data=? WHERE user_id=?", (data, user_id))
-        return jsonify(ok=True, qr_data=data)
-    except Exception as e:
-        return jsonify(ok=False, error=str(e))
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    error = None
+    filename = None
+    if request.method == 'POST':
+        if 'file' not in request.files:
+            error = "Нет файла"
+        file = request.files['file']
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            qr_name = 'clean_qr.png'
+            qr_path = os.path.join(app.config['QR_FOLDER'], qr_name)
+            ok = super_qr_decoder(filepath, qr_path)
+            if ok:
+                filename = qr_name
+            else:
+                error = "Не удалось расшифровать QR-код 😔"
+                filename = None
+        else:
+            error = "Некорректный файл"
+    return render_template_string(HTML, filename=filename, error=error)
+
+@app.route('/qr/<filename>')
+def qr_image(filename):
+    return send_from_directory(app.config['QR_FOLDER'], filename)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     import traceback
@@ -633,6 +661,28 @@ async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE
     await file.download_to_drive(DB_FILENAME)
     await update.message.reply_text(f"База успешно восстановлена из файла {doc.file_name}!")
     return ConversationHandler.END
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def try_decode_qr(image_path):
+    img = Image.open(image_path)
+    decoded = decode(img)
+    if decoded:
+        return decoded[0].data.decode('utf-8')
+    return None
+
+def super_qr_decoder(image_path, save_path):
+    data = try_decode_qr(image_path)
+    if data:
+        # Генерируем новый чистый QR-код
+        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=2, box_size=10)
+        qr.add_data(data)
+        qr.make(fit=True)
+        img_qr = qr.make_image(fill_color="black", back_color="white")
+        img_qr.save(save_path)
+        return True
+    return False
 
 if __name__ == '__main__':
     restore_db_from_telegram()  # сначала восстановить базу
