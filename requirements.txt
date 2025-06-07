@@ -1,5 +1,6 @@
-flask
-flask_cors
-python-telegram-bot
-python-dotenv
-sqlite3
+Flask>=2.2
+Flask-Cors>=3.0
+python-telegram-bot>=20.0
+python-dotenv>=1.0
+APScheduler>=3.10
+pytz>=2023.3 
