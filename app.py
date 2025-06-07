@@ -231,18 +231,18 @@ def api_expired():
         if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
-            now = msk_today_str()
+        now = msk_today_str()
         select_columns = "id, category, tob, name, manufactured_at, shelf_life_days, opened_at, opened_shelf_life_days, opened"
-            rows = db_query(
+        rows = db_query(
             f"SELECT {select_columns} FROM {bar_table}", (), fetch=True
-            )
+        )
         results = []
         for r in rows:
             expiry_by_total = calc_expiry_by_total(r[4], r[5])
             expiry_by_opened = calc_expiry_by_opened(r[6], r[7])
             expiry_final = min_date(expiry_by_total, expiry_by_opened)
             if expiry_final and expiry_final <= now:
-            results.append({
+                results.append({
                     'id': r[0], 'category': r[1], 'tob': r[2], 'name': r[3],
                     'manufactured_at': r[4], 'shelf_life_days': r[5],
                     'opened_at': r[6], 'opened_shelf_life_days': r[7],
