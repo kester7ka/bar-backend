@@ -20,6 +20,12 @@ from functools import wraps
 
 load_dotenv()
 
+# DEBUG: Вывести текущий API_SECRET при запуске
+API_SECRET = os.getenv('API_SECRET', 'supersecretkey')
+print('=== API_SECRET (Flask) ===')
+print(repr(API_SECRET))
+print('==========================')
+
 SQLITE_DB = os.getenv("SQLITE_DB", "your_bot_db.sqlite")
 USERS_TABLE = 'users'
 INVITES_TABLE = 'invites'
@@ -48,8 +54,6 @@ DB_FILENAME = SQLITE_DB
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 last_backup_time = None  # глобальная переменная для хранения времени последнего бэкапа
-
-API_SECRET = os.getenv('API_SECRET', 'supersecretkey')
 
 def verify_hmac(payload, timestamp, hmac_to_check):
     # Проверка времени (2 минуты)
