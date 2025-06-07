@@ -12,8 +12,19 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
+import hmac
+import hashlib
+import time
+import json
+from functools import wraps
 
 load_dotenv()
+
+# DEBUG: Вывести текущий API_SECRET при запуске
+API_SECRET = os.getenv('API_SECRET', 'supersecretkey')
+print('=== API_SECRET (Flask) ===')
+print(repr(API_SECRET))
+print('==========================')
 
 SQLITE_DB = os.getenv("SQLITE_DB", "your_bot_db.sqlite")
 USERS_TABLE = 'users'
@@ -43,6 +54,35 @@ DB_FILENAME = SQLITE_DB
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 last_backup_time = None  # глобальная переменная для хранения времени последнего бэкапа
+
+def verify_hmac(payload, timestamp, hmac_to_check):
+    # Проверка времени (2 минуты)
+    now = int(time.time())
+    try:
+        ts = int(timestamp)
+    except Exception:
+        return False
+    if abs(now - ts) > 120:
+        return False
+    msg = payload + str(timestamp)
+    expected = hmac.new(API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, hmac_to_check)
+
+def require_hmac(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        data = request.get_json()
+        payload = data.get('payload')
+        timestamp = data.get('timestamp')
+        hmac_val = data.get('hmac')
+        if not (payload and timestamp and hmac_val):
+            return jsonify(ok=False, error='HMAC required'), 401
+        if not verify_hmac(payload, timestamp, hmac_val):
+            return jsonify(ok=False, error='Invalid HMAC'), 401
+        # Подменяем request.json на распарсенный payload
+        request._cached_json = json.loads(payload)
+        return f(*args, **kwargs)
+    return wrapper
 
 def ensure_bar_table(bar_name):
     if bar_name not in BARS:
@@ -130,6 +170,7 @@ def min_date(date1, date2):
     return date1 or date2
 
 @app.route('/userinfo', methods=['POST'])
+@require_hmac
 def api_userinfo():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -145,6 +186,7 @@ def api_userinfo():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/add', methods=['POST'])
+@require_hmac
 def api_add():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -183,6 +225,7 @@ def api_add():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/open', methods=['POST'])
+@require_hmac
 def api_open():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -224,6 +267,7 @@ def api_open():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/expired', methods=['POST'])
+@require_hmac
 def api_expired():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -231,18 +275,18 @@ def api_expired():
         if not user_id or not check_user_access(user_id):
             return jsonify(ok=False, error="Нет доступа")
         bar_table = get_bar_table(user_id)
-            now = msk_today_str()
+        now = msk_today_str()
         select_columns = "id, category, tob, name, manufactured_at, shelf_life_days, opened_at, opened_shelf_life_days, opened"
-            rows = db_query(
+        rows = db_query(
             f"SELECT {select_columns} FROM {bar_table}", (), fetch=True
-            )
+        )
         results = []
         for r in rows:
             expiry_by_total = calc_expiry_by_total(r[4], r[5])
             expiry_by_opened = calc_expiry_by_opened(r[6], r[7])
             expiry_final = min_date(expiry_by_total, expiry_by_opened)
             if expiry_final and expiry_final <= now:
-            results.append({
+                results.append({
                     'id': r[0], 'category': r[1], 'tob': r[2], 'name': r[3],
                     'manufactured_at': r[4], 'shelf_life_days': r[5],
                     'opened_at': r[6], 'opened_shelf_life_days': r[7],
@@ -250,12 +294,13 @@ def api_expired():
                     'expiry_by_total': expiry_by_total,
                     'expiry_by_opened': expiry_by_opened,
                     'expiry_final': expiry_final
-            })
+                })
         return jsonify(ok=True, results=results)
     except Exception as e:
         return jsonify(ok=False, error=str(e))
 
 @app.route('/search', methods=['POST'])
+@require_hmac
 def api_search():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -296,6 +341,7 @@ def api_search():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/update', methods=['POST'])
+@require_hmac
 def api_update():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -321,6 +367,7 @@ def api_update():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/delete', methods=['POST'])
+@require_hmac
 def api_delete():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -464,7 +511,6 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = 'Доступные команды:\n' + '\n'.join(commands)
     await update.message.reply_text(text)
 
-# изменяем periodic_backup чтобы сохранять время
 def periodic_backup():
     global last_backup_time
     try:
