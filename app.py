@@ -12,7 +12,7 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
-import hmaci
+import hmac
 import hashlib
 import time
 import json
