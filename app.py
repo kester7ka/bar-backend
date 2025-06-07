@@ -170,7 +170,6 @@ def min_date(date1, date2):
     return date1 or date2
 
 @app.route('/userinfo', methods=['POST'])
-@require_hmac
 def api_userinfo():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -186,7 +185,6 @@ def api_userinfo():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/add', methods=['POST'])
-@require_hmac
 def api_add():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -225,7 +223,6 @@ def api_add():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/open', methods=['POST'])
-@require_hmac
 def api_open():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -267,7 +264,6 @@ def api_open():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/expired', methods=['POST'])
-@require_hmac
 def api_expired():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -300,7 +296,6 @@ def api_expired():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/search', methods=['POST'])
-@require_hmac
 def api_search():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -341,7 +336,6 @@ def api_search():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/update', methods=['POST'])
-@require_hmac
 def api_update():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -367,7 +361,6 @@ def api_update():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/delete', methods=['POST'])
-@require_hmac
 def api_delete():
     data = request.get_json()
     user_id = data.get('user_id')
