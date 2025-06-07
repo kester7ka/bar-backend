@@ -1,4 +1,4 @@
-import os
+mport os
 import threading
 from datetime import datetime, timedelta, timezone
 import sqlite3
@@ -12,6 +12,11 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
+import hmaci
+import hashlib
+import time
+import json
+from functools import wraps
 
 load_dotenv()
 
@@ -43,6 +48,37 @@ DB_FILENAME = SQLITE_DB
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 last_backup_time = None  # глобальная переменная для хранения времени последнего бэкапа
+
+API_SECRET = os.getenv('API_SECRET', 'supersecretkey')
+
+def verify_hmac(payload, timestamp, hmac_to_check):
+    # Проверка времени (2 минуты)
+    now = int(time.time())
+    try:
+        ts = int(timestamp)
+    except Exception:
+        return False
+    if abs(now - ts) > 120:
+        return False
+    msg = payload + str(timestamp)
+    expected = hmac.new(API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, hmac_to_check)
+
+def require_hmac(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        data = request.get_json()
+        payload = data.get('payload')
+        timestamp = data.get('timestamp')
+        hmac_val = data.get('hmac')
+        if not (payload and timestamp and hmac_val):
+            return jsonify(ok=False, error='HMAC required'), 401
+        if not verify_hmac(payload, timestamp, hmac_val):
+            return jsonify(ok=False, error='Invalid HMAC'), 401
+        # Подменяем request.json на распарсенный payload
+        request._cached_json = json.loads(payload)
+        return f(*args, **kwargs)
+    return wrapper
 
 def ensure_bar_table(bar_name):
     if bar_name not in BARS:
@@ -130,6 +166,7 @@ def min_date(date1, date2):
     return date1 or date2
 
 @app.route('/userinfo', methods=['POST'])
+@require_hmac
 def api_userinfo():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -145,6 +182,7 @@ def api_userinfo():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/add', methods=['POST'])
+@require_hmac
 def api_add():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -183,6 +221,7 @@ def api_add():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/open', methods=['POST'])
+@require_hmac
 def api_open():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -224,6 +263,7 @@ def api_open():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/expired', methods=['POST'])
+@require_hmac
 def api_expired():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -256,6 +296,7 @@ def api_expired():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/search', methods=['POST'])
+@require_hmac
 def api_search():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -296,6 +337,7 @@ def api_search():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/update', methods=['POST'])
+@require_hmac
 def api_update():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -321,6 +363,7 @@ def api_update():
         return jsonify(ok=False, error=str(e))
 
 @app.route('/delete', methods=['POST'])
+@require_hmac
 def api_delete():
     data = request.get_json()
     user_id = data.get('user_id')
@@ -464,7 +507,6 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = 'Доступные команды:\n' + '\n'.join(commands)
     await update.message.reply_text(text)
 
-# изменяем periodic_backup чтобы сохранять время
 def periodic_backup():
     global last_backup_time
     try:
